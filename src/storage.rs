@@ -6,10 +6,7 @@ use std::{
     process,
     sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::Duration,
 };
-
-const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 enum Command {
     Save { revision: u64, text: String },
@@ -82,8 +79,8 @@ impl LedgerStore {
             .map_err(|_| io::Error::other("save worker stopped"))?;
 
         reply_rx
-            .recv_timeout(FLUSH_TIMEOUT)
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "save flush timed out"))?
+            .recv()
+            .map_err(|_| io::Error::other("save worker stopped"))?
     }
 }
 
