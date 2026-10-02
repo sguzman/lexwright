@@ -5,6 +5,7 @@ use eframe::egui;
 use crate::storage::{LedgerStore, SaveEvent};
 
 const AUTOSAVE_IDLE: Duration = Duration::from_millis(160);
+const SAVE_STATUS_POLL: Duration = Duration::from_millis(40);
 
 pub struct LexwrightApp {
     text: String,
@@ -14,6 +15,7 @@ pub struct LexwrightApp {
     last_edit: Option<Instant>,
     save_error: Option<String>,
     store: LedgerStore,
+    path_label: String,
     focus_editor: bool,
 }
 
@@ -22,6 +24,7 @@ impl LexwrightApp {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
         let store = LedgerStore::default();
+        let path_label = store.path().display().to_string();
         let (text, save_error) = match store.load() {
             Ok(text) => (text, None),
             Err(error) => (
@@ -38,6 +41,7 @@ impl LexwrightApp {
             last_edit: None,
             save_error,
             store,
+            path_label,
             focus_editor: true,
         }
     }
@@ -97,20 +101,16 @@ impl LexwrightApp {
         }
     }
 
-    fn status_text(&self) -> String {
+    fn show_status(&self, ui: &mut egui::Ui) {
         if let Some(error) = &self.save_error {
-            return format!("save error: {error}");
+            ui.weak(format!("save error: {error}"));
+        } else if self.saved_revision >= self.revision {
+            ui.weak("saved");
+        } else if self.queued_revision >= self.revision {
+            ui.weak("saving");
+        } else {
+            ui.weak("edited");
         }
-
-        if self.saved_revision >= self.revision {
-            return "saved".to_owned();
-        }
-
-        if self.queued_revision >= self.revision {
-            return "saving".to_owned();
-        }
-
-        "edited".to_owned()
     }
 }
 
@@ -119,14 +119,18 @@ impl eframe::App for LexwrightApp {
         self.poll_save_events();
         self.maybe_autosave();
 
+        if self.queued_revision > self.saved_revision {
+            ui.ctx().request_repaint_after(SAVE_STATUS_POLL);
+        }
+
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.strong("Lexwright");
             ui.separator();
-            ui.weak(self.status_text());
+            self.show_status(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(self.store.path().display().to_string());
+                ui.weak(&self.path_label);
             });
         });
         ui.separator();
