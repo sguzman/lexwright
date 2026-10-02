@@ -135,7 +135,6 @@ impl eframe::App for LexwrightApp {
             .font(egui::TextStyle::Monospace)
             .desired_width(f32::INFINITY)
             .lock_focus(true)
-            .frame(false)
             .hint_text("Write.");
 
         let response = ui.add_sized(ui.available_size(), editor);
