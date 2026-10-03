@@ -133,7 +133,7 @@ fn save_worker(path: PathBuf, command_rx: Receiver<Command>, event_tx: Sender<Sa
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
