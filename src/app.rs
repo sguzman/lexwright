@@ -1,4 +1,7 @@
 use std::{
+    env,
+    fs,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -44,6 +47,8 @@ impl AppMetrics {
 struct RuleEditor {
     open: bool,
     active_set: String,
+    note: String,
+    rename_set_name: String,
     starter_enabled: bool,
     rules: Vec<ExpansionRule>,
     new_trigger: String,
@@ -56,6 +61,8 @@ impl RuleEditor {
     fn load_from(&mut self, buffer: &EditorBuffer) {
         self.open = true;
         self.active_set = buffer.expansion_active_set_name().to_owned();
+        self.note = buffer.expansion_active_set_note().to_owned();
+        self.rename_set_name = self.active_set.clone();
         self.starter_enabled = buffer.expansion_starter_enabled();
         self.rules = buffer.expansion_user_rules().to_vec();
         self.new_trigger.clear();
@@ -532,6 +539,8 @@ impl LexwrightApp {
         let mut save_activate = false;
         let mut discard_draft = false;
         let mut reset_stats = false;
+        let mut export_report = false;
+        let mut rename_set = false;
         let mut create_set = false;
         let mut delete_set = false;
 
@@ -590,6 +599,36 @@ impl LexwrightApp {
 
                 ui.weak(
                     "Choosing another ruleset activates it immediately and discards unapplied draft edits in this window.",
+                );
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("rename active");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.rename_set_name)
+                            .desired_width(160.0),
+                    );
+                    if ui
+                        .small_button("Rename")
+                        .on_hover_text(
+                            "Rename the saved active profile. Draft rules and note stay in this window; session telemetry follows the renamed profile.",
+                        )
+                        .clicked()
+                    {
+                        rename_set = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("note");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.note)
+                            .desired_width(480.0)
+                            .hint_text("What is this profile testing?"),
+                    );
+                });
+                ui.weak(
+                    "The note is durable experiment metadata. Save & activate persists note and draft rules together.",
                 );
 
                 ui.add_space(6.0);
@@ -730,6 +769,16 @@ impl LexwrightApp {
                     {
                         reset_stats = true;
                     }
+
+                    if ui
+                        .small_button("Export report")
+                        .on_hover_text(
+                            "Write a Markdown snapshot of the current ruleset comparison and active per-rule stats under XDG state.",
+                        )
+                        .clicked()
+                    {
+                        export_report = true;
+                    }
                 });
                 ui.weak(
                     "Runtime-only measurements for this Lexwright session. Saving a changed ruleset resets that set's stats so old and new definitions are not mixed.",
@@ -784,6 +833,26 @@ impl LexwrightApp {
             return;
         }
 
+        if rename_set {
+            let name = self.rule_editor.rename_set_name.trim().to_owned();
+            if name.is_empty() {
+                self.rule_editor.status = Some("ruleset name cannot be empty".to_owned());
+            } else {
+                match self.buffer.rename_active_expansion_set(&name) {
+                    Ok((previous, current)) => {
+                        self.rule_editor.active_set = current.clone();
+                        self.rule_editor.rename_set_name = current.clone();
+                        self.rule_editor.status =
+                            Some(format!("renamed ruleset {previous:?} to {current:?}"));
+                    }
+                    Err(error) => {
+                        self.rule_editor.status = Some(format!("cannot rename ruleset: {error}"));
+                    }
+                }
+            }
+            return;
+        }
+
         if create_set {
             let name = self.rule_editor.new_set_name.trim().to_owned();
             if name.is_empty() {
@@ -820,6 +889,18 @@ impl LexwrightApp {
             return;
         }
 
+        if export_report {
+            match export_expansion_report(&self.buffer) {
+                Ok(path) => {
+                    self.rule_editor.status =
+                        Some(format!("exported session report to {}", path.display()));
+                }
+                Err(error) => {
+                    self.rule_editor.status = Some(format!("cannot export report: {error}"));
+                }
+            }
+        }
+
         if reset_stats {
             self.buffer.reset_active_expansion_stats();
             self.rule_editor.status = Some(format!(
@@ -835,10 +916,14 @@ impl LexwrightApp {
         }
 
         if save_activate {
+            let note = self.rule_editor.note.clone();
             let starter_enabled = self.rule_editor.starter_enabled;
             let rules = self.rule_editor.rules.clone();
 
-            match self.buffer.apply_expansion_config(starter_enabled, rules) {
+            match self
+                .buffer
+                .apply_expansion_config(note, starter_enabled, rules)
+            {
                 Ok(()) => {
                     self.rule_editor.active_set =
                         self.buffer.expansion_active_set_name().to_owned();
@@ -1705,6 +1790,31 @@ fn lexical_color(class: LexicalClass) -> egui::Color32 {
         LexicalClass::AdverbLike => egui::Color32::from_rgb(137, 222, 138),
         LexicalClass::NounLike => egui::Color32::from_rgb(120, 181, 255),
     }
+}
+
+fn expansion_report_path() -> PathBuf {
+    if let Some(state_home) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(state_home).join("lexwright/expansion-session.md");
+    }
+
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(home).join(".local/state/lexwright/expansion-session.md");
+    }
+
+    PathBuf::from("lexwright-expansion-session.md")
+}
+
+fn export_expansion_report(buffer: &EditorBuffer) -> Result<PathBuf, String> {
+    let path = expansion_report_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+
+    fs::write(&path, buffer.expansion_session_report())
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+
+    Ok(path)
 }
 
 fn format_ns(nanos: u64) -> String {
