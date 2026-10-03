@@ -9,7 +9,7 @@ use crate::{
     analysis::{AnalysisWorker, LexicalClass, LexicalSpan, MorphClass, MorphSpan, TextAnalysis},
     editor_buffer::EditorBuffer,
     expansion::ExpansionRule,
-    harper::{HarperResult, HarperSuggestion, HarperWorker},
+    harper::{HarperDiagnostic, HarperResult, HarperSuggestion, HarperWorker},
     metrics::TimingMetric,
     storage::{LedgerStore, SaveEvent},
 };
@@ -1065,23 +1065,31 @@ impl eframe::App for LexwrightApp {
             None
         };
 
-        let response = if self.structure_overlay || self.morphology_overlay {
-            let morphology_overlay = self.morphology_overlay;
-            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-                let text = buffer.as_str();
+        let harper_diagnostics = if self.harper_enabled {
+            self.harper_latest
+                .as_ref()
+                .filter(|result| result.revision == self.revision)
+                .map(|result| Arc::clone(&result.diagnostics))
+        } else {
+            None
+        };
 
-                if morphology_overlay {
-                    match morph_spans.as_deref() {
-                        Some(spans) => morphology_galley(ui, text, wrap_width, spans),
-                        None => plain_galley(ui, text, wrap_width),
-                    }
-                } else {
-                    match lexical_spans.as_deref() {
-                        Some(spans) => lexical_galley(ui, text, wrap_width, spans),
-                        None => plain_galley(ui, text, wrap_width),
-                    }
-                }
-            };
+        // Keep one stable decoration path while any visual analyzer is enabled.
+        // Critically, decorated_galley preserves TextEdit's no-wrap semantics.
+        let decorations_active =
+            self.structure_overlay || self.morphology_overlay || self.harper_enabled;
+
+        let response = if decorations_active {
+            let mut layouter =
+                |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _wrap_width: f32| {
+                    decorated_galley(
+                        ui,
+                        buffer.as_str(),
+                        lexical_spans.as_deref(),
+                        morph_spans.as_deref(),
+                        harper_diagnostics.as_deref(),
+                    )
+                };
 
             let editor = egui::TextEdit::multiline(&mut self.buffer)
                 .font(egui::TextStyle::Monospace)
@@ -1121,124 +1129,145 @@ impl eframe::App for LexwrightApp {
     }
 }
 
-fn plain_galley(ui: &egui::Ui, text: &str, wrap_width: f32) -> Arc<egui::Galley> {
+fn decorated_galley(
+    ui: &egui::Ui,
+    text: &str,
+    lexical_spans: Option<&[LexicalSpan]>,
+    morph_spans: Option<&[MorphSpan]>,
+    harper_diagnostics: Option<&[HarperDiagnostic]>,
+) -> Arc<egui::Galley> {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let default_color = ui.visuals().text_color();
     let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = wrap_width;
-    job.append(
-        text,
-        0.0,
-        egui::TextFormat {
-            font_id,
-            color: ui.visuals().text_color(),
-            ..Default::default()
-        },
+
+    // TextEdit::desired_width(INFINITY) disables automatic word wrapping. The old
+    // custom layouters accidentally overwrote that with the viewport width, causing
+    // words to jump between rows whenever decorated text was active.
+    job.wrap.max_width = f32::INFINITY;
+
+    if text.is_empty() {
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat {
+                font_id,
+                color: default_color,
+                ..Default::default()
+            },
+        );
+        return ui.fonts_mut(|fonts| fonts.layout_job(job));
+    }
+
+    let mut boundaries = Vec::with_capacity(
+        2 + lexical_spans.map_or(0, |spans| spans.len() * 2)
+            + morph_spans.map_or(0, |spans| spans.len() * 2)
+            + harper_diagnostics.map_or(0, |diagnostics| diagnostics.len() * 2),
     );
-    ui.fonts_mut(|fonts| fonts.layout_job(job))
-}
+    boundaries.push(0);
+    boundaries.push(text.len());
 
-fn lexical_galley(
-    ui: &egui::Ui,
-    text: &str,
-    wrap_width: f32,
-    spans: &[LexicalSpan],
-) -> Arc<egui::Galley> {
-    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let default_color = ui.visuals().text_color();
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = wrap_width;
+    if let Some(spans) = lexical_spans {
+        for span in spans {
+            push_valid_boundaries(text, &mut boundaries, span.start, span.end);
+        }
+    }
 
-    let default_format = egui::TextFormat {
-        font_id: font_id.clone(),
-        color: default_color,
-        ..Default::default()
-    };
+    if let Some(spans) = morph_spans {
+        for span in spans {
+            push_valid_boundaries(text, &mut boundaries, span.start, span.end);
+        }
+    }
 
-    let mut cursor = 0;
+    if let Some(diagnostics) = harper_diagnostics {
+        for diagnostic in diagnostics {
+            push_valid_boundaries(
+                text,
+                &mut boundaries,
+                diagnostic.start_byte,
+                diagnostic.end_byte,
+            );
+        }
+    }
 
-    for span in spans {
-        if span.start < cursor
-            || span.end > text.len()
-            || span.start > span.end
-            || !text.is_char_boundary(span.start)
-            || !text.is_char_boundary(span.end)
-        {
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    for pair in boundaries.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+
+        if start >= end {
             continue;
         }
 
-        if span.start > cursor {
-            job.append(&text[cursor..span.start], 0.0, default_format.clone());
-        }
+        let color = morph_spans
+            .and_then(|spans| {
+                spans
+                    .iter()
+                    .find(|span| span.start <= start && end <= span.end)
+                    .map(|span| morphology_color(span.class))
+            })
+            .or_else(|| {
+                lexical_spans.and_then(|spans| {
+                    spans
+                        .iter()
+                        .find(|span| span.start <= start && end <= span.end)
+                        .map(|span| lexical_color(span.class))
+                })
+            })
+            .unwrap_or(default_color);
+
+        let underline = harper_diagnostics
+            .and_then(|diagnostics| {
+                diagnostics
+                    .iter()
+                    .filter(|diagnostic| {
+                        diagnostic.start_byte < end && start < diagnostic.end_byte
+                    })
+                    .max_by_key(|diagnostic| diagnostic.priority)
+            })
+            .map_or(egui::Stroke::NONE, |diagnostic| {
+                egui::Stroke::new(1.0, harper_underline_color(diagnostic.kind.as_ref()))
+            });
 
         job.append(
-            &text[span.start..span.end],
+            &text[start..end],
             0.0,
             egui::TextFormat {
                 font_id: font_id.clone(),
-                color: lexical_color(span.class),
+                color,
+                underline,
                 ..Default::default()
             },
         );
-        cursor = span.end;
-    }
-
-    if cursor < text.len() {
-        job.append(&text[cursor..], 0.0, default_format);
     }
 
     ui.fonts_mut(|fonts| fonts.layout_job(job))
 }
 
-fn morphology_galley(
-    ui: &egui::Ui,
-    text: &str,
-    wrap_width: f32,
-    spans: &[MorphSpan],
-) -> Arc<egui::Galley> {
-    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let default_color = ui.visuals().text_color();
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = wrap_width;
-
-    let default_format = egui::TextFormat {
-        font_id: font_id.clone(),
-        color: default_color,
-        ..Default::default()
-    };
-
-    let mut cursor = 0;
-
-    for span in spans {
-        if span.start < cursor
-            || span.end > text.len()
-            || span.start > span.end
-            || !text.is_char_boundary(span.start)
-            || !text.is_char_boundary(span.end)
-        {
-            continue;
-        }
-
-        if span.start > cursor {
-            job.append(&text[cursor..span.start], 0.0, default_format.clone());
-        }
-
-        job.append(
-            &text[span.start..span.end],
-            0.0,
-            egui::TextFormat {
-                font_id: font_id.clone(),
-                color: morphology_color(span.class),
-                ..Default::default()
-            },
-        );
-        cursor = span.end;
+fn push_valid_boundaries(text: &str, boundaries: &mut Vec<usize>, start: usize, end: usize) {
+    if start > end
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return;
     }
 
-    if cursor < text.len() {
-        job.append(&text[cursor..], 0.0, default_format);
-    }
+    boundaries.push(start);
+    boundaries.push(end);
+}
 
-    ui.fonts_mut(|fonts| fonts.layout_job(job))
+fn harper_underline_color(kind: &str) -> egui::Color32 {
+    let kind = kind.to_ascii_lowercase();
+
+    if kind.contains("spelling") {
+        egui::Color32::from_rgb(255, 92, 92)
+    } else if kind.contains("capital") {
+        egui::Color32::from_rgb(255, 190, 92)
+    } else {
+        egui::Color32::from_rgb(255, 138, 92)
+    }
 }
 
 fn morphology_color(class: MorphClass) -> egui::Color32 {

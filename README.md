@@ -129,7 +129,7 @@ Unclassified words remain the normal text color. Hover **structure on/off** for 
 
 This is scaffolding for the real system, not a claim that suffixes solve part-of-speech tagging. The useful achievement is that revision-tagged linguistic spans can now flow from the background analyzer into the live editor without the classifier entering the typing path.
 
-The overlay is **off by default**. egui invokes a custom TextEdit layouter at least once per frame, so Lexwright does not pay that rendering cost unless the user explicitly asks to see structure.
+The overlay is **off by default**. egui invokes a custom TextEdit layouter at least once per frame, so Lexwright does not pay that rendering cost unless a visual analyzer is enabled. The decoration layouter preserves the editor's normal no-wrap behavior; enabling structure, morphology, or Harper must not change where words break.
 
 
 ## Morphology overlay
@@ -172,7 +172,7 @@ Arc<str>
 
 The Harper dictionary and curated American-English linter are initialized lazily on the worker after the first request. They never run on the process-start -> first-frame path.
 
-The diagnostics window preserves each issue's exact source span, Harper category, message, priority, and structured replacement/insertion/removal suggestions. Suggestions can now be applied explicitly. Each apply operation is revision-checked against the snapshot that produced the diagnostic, validates UTF-8 byte boundaries, seeds egui's undo history with the exact pre-fix text/cursor state, moves the cursor deterministically after the replacement, and becomes a normal new Lexwright revision. **Ctrl+Z restores the pre-fix text.**
+Harper diagnostics are also underlined directly in the editor whenever the result matches the live revision, so spelling/grammar mistakes remain visible without opening the diagnostics window. Spelling uses a red underline; capitalization and other grammar classes use distinct warm underlines. The diagnostics window preserves each issue's exact source span, Harper category, message, priority, and structured replacement/insertion/removal suggestions. Suggestions can now be applied explicitly. Each apply operation is revision-checked against the snapshot that produced the diagnostic, validates UTF-8 byte boundaries, seeds egui's undo history with the exact pre-fix text/cursor state, moves the cursor deterministically after the replacement, and becomes a normal new Lexwright revision. **Ctrl+Z restores the pre-fix text.**
 
 Harper results are revision-tagged and queued stale snapshots are collapsed before the next grammar pass. If the ledger changes before a suggestion is applied, that suggestion expires rather than editing the wrong bytes. A slow Harper pass therefore cannot block typing or delay the lightweight structure/morphology analyzer.
 
