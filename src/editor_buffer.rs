@@ -42,6 +42,31 @@ impl EditorBuffer {
         &self.text
     }
 
+    pub fn replace_byte_range(
+        &mut self,
+        range: Range<usize>,
+        replacement: &str,
+    ) -> Result<usize, String> {
+        if range.start > range.end || range.end > self.text.len() {
+            return Err("edit range is outside the current ledger".to_owned());
+        }
+
+        if !self.text.is_char_boundary(range.start) || !self.text.is_char_boundary(range.end) {
+            return Err("edit range does not land on UTF-8 character boundaries".to_owned());
+        }
+
+        let start_char = self.text[..range.start].chars().count();
+        let replacement_chars = replacement.chars().count();
+
+        self.text.replace_range(range, replacement);
+
+        if self.ascii_only && !replacement.is_ascii() {
+            self.ascii_only = false;
+        }
+
+        Ok(start_char.saturating_add(replacement_chars))
+    }
+
     pub fn is_ascii_fast_path(&self) -> bool {
         self.ascii_only
     }
@@ -239,6 +264,30 @@ mod tests {
 
         assert_eq!(buffer.insert_text(",", CharIndex(3)), 3);
         assert_eq!(buffer.text(), "would,");
+    }
+
+    #[test]
+    fn external_byte_range_edit_returns_new_character_cursor() {
+        let mut buffer = EditorBuffer::new("hello world".to_owned());
+        let cursor = buffer
+            .replace_byte_range(6..11, "Lexwright")
+            .expect("external edit failed");
+
+        assert_eq!(buffer.text(), "hello Lexwright");
+        assert_eq!(cursor, 15);
+    }
+
+    #[test]
+    fn external_byte_range_edit_respects_utf8_boundaries() {
+        let mut buffer = EditorBuffer::new("café".to_owned());
+
+        assert!(buffer.replace_byte_range(4..5, "x").is_err());
+
+        let cursor = buffer
+            .replace_byte_range(3..5, "e")
+            .expect("valid utf8 edit failed");
+        assert_eq!(buffer.text(), "cafe");
+        assert_eq!(cursor, 4);
     }
 
     #[test]

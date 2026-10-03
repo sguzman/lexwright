@@ -9,7 +9,7 @@ use crate::{
     analysis::{AnalysisWorker, LexicalClass, LexicalSpan, MorphClass, MorphSpan, TextAnalysis},
     editor_buffer::EditorBuffer,
     expansion::ExpansionRule,
-    harper::{HarperResult, HarperWorker},
+    harper::{HarperResult, HarperSuggestion, HarperWorker},
     metrics::TimingMetric,
     storage::{LedgerStore, SaveEvent},
 };
@@ -58,6 +58,14 @@ impl RuleEditor {
     }
 }
 
+struct PendingExternalEdit {
+    expected_revision: u64,
+    start_byte: usize,
+    end_byte: usize,
+    replacement: String,
+    description: String,
+}
+
 pub struct LexwrightApp {
     buffer: EditorBuffer,
     revision: u64,
@@ -83,6 +91,8 @@ pub struct LexwrightApp {
     harper_pending_revision: Option<u64>,
     harper_error: Option<String>,
     harper_window: bool,
+    pending_external_edit: Option<PendingExternalEdit>,
+    harper_action_status: Option<String>,
 }
 
 impl LexwrightApp {
@@ -139,6 +149,8 @@ impl LexwrightApp {
             harper_pending_revision,
             harper_error,
             harper_window: false,
+            pending_external_edit: None,
+            harper_action_status: None,
         }
     }
 
@@ -277,6 +289,57 @@ impl LexwrightApp {
                     self.harper_pending_revision = None;
                 }
                 self.harper_latest = Some(result);
+            }
+        }
+    }
+
+    fn apply_pending_external_edit(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
+        let Some(edit) = self.pending_external_edit.take() else {
+            return;
+        };
+
+        if edit.expected_revision != self.revision {
+            self.harper_action_status = Some(
+                "suggestion expired because the ledger changed before it was applied".to_owned(),
+            );
+            return;
+        }
+
+        let mut state = egui::TextEdit::load_state(ctx, editor_id).unwrap_or_default();
+        let old_cursor = state.cursor.char_range().unwrap_or_else(|| {
+            egui::text::CCursorRange::one(egui::text::CCursor::new(
+                self.buffer.text().chars().count(),
+            ))
+        });
+
+        // Programmatic edits explicitly seed egui's undoer with the pre-edit state.
+        // The TextEdit sees the mutated state immediately afterwards, so Ctrl+Z can
+        // return to the exact text/cursor state that existed before the suggestion.
+        let old_text = self.buffer.text().to_owned();
+        let mut undoer = state.undoer();
+        undoer.add_undo(&(old_cursor, old_text));
+
+        match self
+            .buffer
+            .replace_byte_range(edit.start_byte..edit.end_byte, &edit.replacement)
+        {
+            Ok(cursor_char) => {
+                let cursor =
+                    egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_char));
+                state.cursor.set_char_range(Some(cursor));
+                state.set_undoer(undoer);
+                state.store(ctx, editor_id);
+
+                self.mark_edited(ctx);
+                self.focus_editor = true;
+                self.harper_action_status = Some(format!(
+                    "applied {}; Ctrl+Z restores the previous text",
+                    edit.description
+                ));
+            }
+            Err(error) => {
+                self.harper_action_status =
+                    Some(format!("could not apply suggestion: {error}"));
             }
         }
     }
@@ -748,6 +811,7 @@ impl LexwrightApp {
         }
 
         let mut open = self.harper_window;
+        let mut requested_edit = None;
 
         egui::Window::new("Harper diagnostics")
             .open(&mut open)
@@ -771,8 +835,14 @@ impl LexwrightApp {
                 }
 
                 ui.weak(
-                    "Suggestions are observational for now. Nothing in this window rewrites the ledger.",
+                    "Suggestions apply as revision-checked editor mutations and participate in Ctrl+Z.",
                 );
+
+                if let Some(status) = &self.harper_action_status {
+                    ui.add_space(4.0);
+                    ui.weak(status);
+                }
+
                 ui.add_space(6.0);
 
                 if !self.harper_enabled {
@@ -819,8 +889,37 @@ impl LexwrightApp {
                             if !diagnostic.suggestions.is_empty() {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.weak("suggestions:");
+
                                     for suggestion in diagnostic.suggestions.iter() {
-                                        ui.monospace(suggestion.label());
+                                        let button_label = format!("apply {}", suggestion.label());
+                                        if ui.small_button(button_label).clicked() {
+                                            let (start_byte, end_byte, replacement) =
+                                                match suggestion {
+                                                    HarperSuggestion::ReplaceWith(text) => (
+                                                        diagnostic.start_byte,
+                                                        diagnostic.end_byte,
+                                                        text.to_string(),
+                                                    ),
+                                                    HarperSuggestion::InsertAfter(text) => (
+                                                        diagnostic.end_byte,
+                                                        diagnostic.end_byte,
+                                                        text.to_string(),
+                                                    ),
+                                                    HarperSuggestion::Remove => (
+                                                        diagnostic.start_byte,
+                                                        diagnostic.end_byte,
+                                                        String::new(),
+                                                    ),
+                                                };
+
+                                            requested_edit = Some(PendingExternalEdit {
+                                                expected_revision: result.revision,
+                                                start_byte,
+                                                end_byte,
+                                                replacement,
+                                                description: suggestion.label(),
+                                            });
+                                        }
                                     }
                                 });
                             }
@@ -831,6 +930,10 @@ impl LexwrightApp {
             });
 
         self.harper_window = open;
+
+        if let Some(edit) = requested_edit {
+            self.pending_external_edit = Some(edit);
+        }
     }
 
     fn show_perf_status(&self, ui: &mut egui::Ui) {
@@ -943,6 +1046,9 @@ impl eframe::App for LexwrightApp {
         self.show_lexeme_window(ui.ctx());
         self.show_harper_window(ui.ctx());
 
+        let editor_id = egui::Id::new("lexwright-ledger-editor");
+        self.apply_pending_external_edit(ui.ctx(), editor_id);
+
         let lexical_spans = if self.structure_overlay {
             self.analysis_latest
                 .as_ref()
@@ -984,6 +1090,7 @@ impl eframe::App for LexwrightApp {
                 .desired_width(f32::INFINITY)
                 .lock_focus(true)
                 .hint_text("Write.")
+                .id(editor_id)
                 .layouter(&mut layouter);
 
             ui.add_sized(ui.available_size(), editor)
@@ -992,7 +1099,8 @@ impl eframe::App for LexwrightApp {
                 .font(egui::TextStyle::Monospace)
                 .desired_width(f32::INFINITY)
                 .lock_focus(true)
-                .hint_text("Write.");
+                .hint_text("Write.")
+                .id(editor_id);
 
             ui.add_sized(ui.available_size(), editor)
         };
