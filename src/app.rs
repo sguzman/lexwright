@@ -525,11 +525,12 @@ impl LexwrightApp {
 
         let config_path = self.buffer.expansion_config_path().display().to_string();
         let set_names = self.buffer.expansion_set_names();
+        let set_stats = self.buffer.expansion_stats_by_set();
         let active_set = self.buffer.expansion_active_set_name().to_owned();
         let mut requested_set = active_set.clone();
         let mut open = self.rule_editor.open;
-        let mut apply = false;
-        let mut revert = false;
+        let mut save_activate = false;
+        let mut discard_draft = false;
         let mut create_set = false;
         let mut delete_set = false;
 
@@ -567,7 +568,7 @@ impl LexwrightApp {
                     if ui
                         .small_button("Clone active")
                         .on_hover_text(
-                            "Create a new named ruleset from the currently applied active set and switch to it. Apply draft edits first if you want them included.",
+                            "Create a new named ruleset from the currently saved active set and switch to it. Save & activate draft edits first if you want them included.",
                         )
                         .clicked()
                     {
@@ -625,7 +626,7 @@ impl LexwrightApp {
                                 ),
                             });
                             self.rule_editor.status = Some(
-                                "draft rule added; Apply to compile and save".to_owned(),
+                                "draft rule added; Save & activate to compile and persist".to_owned(),
                             );
                         }
                     }
@@ -670,17 +671,17 @@ impl LexwrightApp {
                 if let Some(index) = remove_index {
                     self.rule_editor.rules.remove(index);
                     self.rule_editor.status =
-                        Some("draft rule removed; Apply to save".to_owned());
+                        Some("draft rule removed; Save & activate to persist".to_owned());
                 }
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
-                        apply = true;
+                    if ui.button("Save & activate").clicked() {
+                        save_activate = true;
                     }
 
-                    if ui.button("Revert").clicked() {
-                        revert = true;
+                    if ui.button("Discard draft").clicked() {
+                        discard_draft = true;
                     }
 
                     let stats = self.buffer.active_expansion_stats();
@@ -703,9 +704,44 @@ impl LexwrightApp {
                     ui.weak(status);
                 }
 
+                ui.add_space(8.0);
+                ui.separator();
+                ui.strong("Session comparison");
+                ui.weak(
+                    "Runtime-only measurements for this Lexwright session. Zero-hit sets remain visible for comparison.",
+                );
+                egui::Grid::new("lexwright_expansion_ruleset_stats")
+                    .num_columns(5)
+                    .striped(true)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.strong("ruleset");
+                        ui.strong("hits");
+                        ui.strong("typed / output");
+                        ui.strong("typed %");
+                        ui.strong("avoided");
+                        ui.end_row();
+
+                        for (name, stats) in &set_stats {
+                            if name == &active_set {
+                                ui.strong(format!("{name} · active"));
+                            } else {
+                                ui.label(name);
+                            }
+                            ui.monospace(stats.hits.to_string());
+                            ui.monospace(format!(
+                                "{} / {}",
+                                stats.trigger_chars, stats.output_chars
+                            ));
+                            ui.monospace(format!("{:.1}%", stats.typed_percent()));
+                            ui.monospace(stats.avoided_chars().to_string());
+                            ui.end_row();
+                        }
+                    });
+
                 ui.add_space(4.0);
                 ui.weak(
-                    "Rulesets are saved and compiled only by explicit actions here. Typing still sees one precompiled active trie.",
+                    "Save & activate validates, writes expansions.tsv, and recompiles the active trie. Typing still sees one precompiled active trie.",
                 );
             });
 
@@ -760,12 +796,12 @@ impl LexwrightApp {
             return;
         }
 
-        if revert {
+        if discard_draft {
             self.rule_editor.load_from(&self.buffer);
-            self.rule_editor.status = Some("reverted to the active rules".to_owned());
+            self.rule_editor.status = Some("discarded draft; reloaded saved active rules".to_owned());
         }
 
-        if apply {
+        if save_activate {
             let starter_enabled = self.rule_editor.starter_enabled;
             let rules = self.rule_editor.rules.clone();
 
@@ -780,7 +816,8 @@ impl LexwrightApp {
                     ));
                 }
                 Err(error) => {
-                    self.rule_editor.status = Some(format!("cannot apply: {error}"));
+                    self.rule_editor.status =
+                        Some(format!("cannot save & activate: {error}"));
                 }
             }
         }
