@@ -157,6 +157,20 @@ impl EditorBuffer {
             .map_or_else(ExpansionSessionStats::default, |(_, stats)| *stats)
     }
 
+    pub fn expansion_stats_by_set(&self) -> Vec<(String, ExpansionSessionStats)> {
+        self.expansions
+            .set_names()
+            .map(|name| {
+                let stats = self
+                    .expansion_stats
+                    .iter()
+                    .find(|(candidate, _)| candidate == name)
+                    .map_or_else(ExpansionSessionStats::default, |(_, stats)| *stats);
+                (name.to_owned(), stats)
+            })
+            .collect()
+    }
+
     pub fn expansion_config_path(&self) -> &std::path::Path {
         self.expansions.config_path()
     }
