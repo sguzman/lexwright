@@ -4,6 +4,7 @@ use eframe::egui;
 
 use crate::{
     editor_buffer::EditorBuffer,
+    expansion::ExpansionRule,
     metrics::TimingMetric,
     storage::{LedgerStore, SaveEvent},
 };
@@ -31,6 +32,27 @@ impl AppMetrics {
     }
 }
 
+#[derive(Default)]
+struct RuleEditor {
+    open: bool,
+    starter_enabled: bool,
+    rules: Vec<ExpansionRule>,
+    new_trigger: String,
+    new_replacement: String,
+    status: Option<String>,
+}
+
+impl RuleEditor {
+    fn load_from(&mut self, buffer: &EditorBuffer) {
+        self.open = true;
+        self.starter_enabled = buffer.expansion_starter_enabled();
+        self.rules = buffer.expansion_user_rules().to_vec();
+        self.new_trigger.clear();
+        self.new_replacement.clear();
+        self.status = None;
+    }
+}
+
 pub struct LexwrightApp {
     buffer: EditorBuffer,
     revision: u64,
@@ -42,6 +64,7 @@ pub struct LexwrightApp {
     path_label: String,
     focus_editor: bool,
     metrics: AppMetrics,
+    rule_editor: RuleEditor,
 }
 
 impl LexwrightApp {
@@ -69,6 +92,7 @@ impl LexwrightApp {
             path_label,
             focus_editor: true,
             metrics: AppMetrics::new(process_started),
+            rule_editor: RuleEditor::default(),
         }
     }
 
@@ -171,9 +195,173 @@ impl LexwrightApp {
             self.focus_editor = true;
         }
 
+        if ui.small_button("rules").clicked() {
+            self.rule_editor.load_from(&self.buffer);
+        }
+
         if let Some(error) = self.buffer.expansion_config_error() {
             ui.separator();
             ui.weak("expansion config error").on_hover_text(error);
+        }
+    }
+
+    fn show_rule_editor(&mut self, ctx: &egui::Context) {
+        if !self.rule_editor.open {
+            return;
+        }
+
+        let config_path = self.buffer.expansion_config_path().display().to_string();
+        let mut open = self.rule_editor.open;
+        let mut apply = false;
+        let mut revert = false;
+
+        egui::Window::new("Expansion rules")
+            .open(&mut open)
+            .default_width(640.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.weak(&config_path);
+                ui.add_space(4.0);
+
+                ui.checkbox(
+                    &mut self.rule_editor.starter_enabled,
+                    "Enable the 10 starter rules",
+                )
+                .on_hover_text(
+                    "User rules override starter rules with the same trigger. Turn this off to build your expansion language from scratch.",
+                );
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.strong("Add rule");
+                    ui.label("trigger");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.new_trigger)
+                            .desired_width(100.0),
+                    );
+                    ui.label("replacement");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.new_replacement)
+                            .desired_width(240.0),
+                    );
+
+                    if ui.button("Add").clicked() {
+                        if self.rule_editor.new_trigger.is_empty() {
+                            self.rule_editor.status =
+                                Some("trigger cannot be empty".to_owned());
+                        } else {
+                            self.rule_editor.rules.push(ExpansionRule {
+                                trigger: std::mem::take(&mut self.rule_editor.new_trigger),
+                                replacement: std::mem::take(
+                                    &mut self.rule_editor.new_replacement,
+                                ),
+                            });
+                            self.rule_editor.status = Some(
+                                "draft rule added; Apply to compile and save".to_owned(),
+                            );
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+
+                let mut remove_index = None;
+                egui::ScrollArea::vertical()
+                    .max_height(340.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("lexwright_expansion_rule_grid")
+                            .num_columns(3)
+                            .striped(true)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("trigger");
+                                ui.strong("replacement");
+                                ui.strong("");
+                                ui.end_row();
+
+                                for (index, rule) in
+                                    self.rule_editor.rules.iter_mut().enumerate()
+                                {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut rule.trigger)
+                                            .desired_width(120.0),
+                                    );
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut rule.replacement)
+                                            .desired_width(360.0),
+                                    );
+                                    if ui.small_button("remove").clicked() {
+                                        remove_index = Some(index);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                if let Some(index) = remove_index {
+                    self.rule_editor.rules.remove(index);
+                    self.rule_editor.status =
+                        Some("draft rule removed; Apply to save".to_owned());
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+
+                    if ui.button("Revert").clicked() {
+                        revert = true;
+                    }
+
+                    ui.weak(format!(
+                        "{} draft user rules · starter rules {}",
+                        self.rule_editor.rules.len(),
+                        if self.rule_editor.starter_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ));
+                });
+
+                if let Some(status) = &self.rule_editor.status {
+                    ui.add_space(4.0);
+                    ui.weak(status);
+                }
+
+                ui.add_space(4.0);
+                ui.weak(
+                    "Rules are compiled only when you press Apply. Editing this window never enters the typing hot path.",
+                );
+            });
+
+        self.rule_editor.open = open;
+
+        if revert {
+            self.rule_editor.load_from(&self.buffer);
+            self.rule_editor.status = Some("reverted to the active rules".to_owned());
+        }
+
+        if apply {
+            let starter_enabled = self.rule_editor.starter_enabled;
+            let rules = self.rule_editor.rules.clone();
+
+            match self
+                .buffer
+                .apply_expansion_config(starter_enabled, rules)
+            {
+                Ok(()) => {
+                    self.rule_editor.status = Some(format!(
+                        "saved and compiled {} active rules",
+                        self.buffer.expansion_rule_count()
+                    ));
+                }
+                Err(error) => {
+                    self.rule_editor.status = Some(format!("cannot apply: {error}"));
+                }
+            }
         }
     }
 
@@ -267,6 +455,8 @@ impl eframe::App for LexwrightApp {
             });
         });
         ui.separator();
+
+        self.show_rule_editor(ui.ctx());
 
         let editor = egui::TextEdit::multiline(&mut self.buffer)
             .font(egui::TextStyle::Monospace)

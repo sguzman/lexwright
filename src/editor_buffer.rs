@@ -3,7 +3,7 @@ use std::{any::TypeId, ops::Range, time::Instant};
 use eframe::egui::{self, TextBuffer};
 
 use crate::{
-    expansion::{ExpansionEngine, is_activation_char},
+    expansion::{ExpansionConfig, ExpansionEngine, ExpansionRule, is_activation_char},
     metrics::TimingMetric,
 };
 
@@ -80,6 +80,25 @@ impl EditorBuffer {
 
     pub fn expansion_config_error(&self) -> Option<&str> {
         self.expansions.config_error()
+    }
+
+    pub fn expansion_starter_enabled(&self) -> bool {
+        self.expansions.config().starter_enabled
+    }
+
+    pub fn expansion_user_rules(&self) -> &[ExpansionRule] {
+        &self.expansions.config().user_rules
+    }
+
+    pub fn apply_expansion_config(
+        &mut self,
+        starter_enabled: bool,
+        user_rules: Vec<ExpansionRule>,
+    ) -> Result<(), String> {
+        self.expansions.apply_config(ExpansionConfig {
+            starter_enabled,
+            user_rules,
+        })
     }
 
     fn byte_index_for_char(&mut self, char_index: egui::text::CharIndex) -> usize {

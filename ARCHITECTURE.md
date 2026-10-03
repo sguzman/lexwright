@@ -57,7 +57,7 @@ The current snapshot operation still clones the document string on the UI thread
 
 Text expansion is special because it intentionally changes canonical text while the user is typing, so it is the only linguistic layer currently allowed to run synchronously.
 
-Rules are compiled once at startup into a **reversed trie**. On an activation character such as a space or punctuation, matching walks backward from the insertion point only while a trie branch exists. It does not regex-scan or search the document.
+Rules are compiled into a **reversed trie**. On an activation character such as a space or punctuation, matching walks backward from the insertion point only while a trie branch exists. It does not regex-scan or search the document.
 
 Current invariants:
 
@@ -69,7 +69,11 @@ Current invariants:
 - the synchronous expansion layer only accepts replacements at least as long as their triggers, allowing the editor buffer to report the correct forward cursor advance immediately
 - shortening and arbitrary rewrites belong in a later transformation layer with explicit cursor/state handling
 
-Starter rules are compiled into the binary. User rules are loaded once at startup from `$XDG_CONFIG_HOME/lexwright/expansions.tsv` (or `~/.config/lexwright/expansions.tsv`) and override starter rules by trigger.
+Starter rules are compiled into the binary. User rules are stored in `$XDG_CONFIG_HOME/lexwright/expansions.tsv` (or `~/.config/lexwright/expansions.tsv`) and override starter rules by trigger.
+
+The in-app rule editor works on a detached draft. Editing the draft does not rebuild or mutate the live trie. An explicit **Apply** action validates the entire configuration, writes it atomically, then rebuilds the trie. This keeps configuration work completely outside the normal typing hot path.
+
+The config also persists whether the starter set is enabled. Turning starter rules off gives the user a blank expansion language without deleting their custom rules.
 
 ## 4. Measurement
 

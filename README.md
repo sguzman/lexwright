@@ -97,9 +97,21 @@ The probe measures append edits, middle-of-document edits, and snapshot cloning 
 This exists to answer a concrete engineering question: **at what document size does the current contiguous String stop being good enough on the actual machine?**
 
 
-## Custom expansion rules
+## Expansion rules
 
-User rules are read once at startup from:
+Lexwright now has an in-app rule editor. Click **rules** beside the expansion status in the top bar.
+
+The panel lets you:
+
+- add, edit, and remove user rules
+- turn the starter rules on or off
+- override a starter trigger with your own replacement
+- revert a draft back to the currently active rules
+- apply changes live without restarting Lexwright
+
+Draft editing does not mutate the live matcher. **Apply** validates the draft, atomically saves it, and recompiles the reversed trie. That work happens only on the explicit Apply action, never on the normal typing path.
+
+The durable config lives at:
 
 ```text
 $XDG_CONFIG_HOME/lexwright/expansions.tsv
@@ -113,15 +125,18 @@ or, when `XDG_CONFIG_HOME` is unset:
 
 Override the path with `LEXWRIGHT_EXPANSIONS`.
 
-The format is deliberately trivial: one tab-separated rule per line.
+The file remains intentionally simple and human-editable:
 
 ```text
-# trigger<TAB>replacement
+# Lexwright expansion rules
+@starter	true
 idk	I don't know
 fwiw	for what it's worth
 ```
 
-User rules override starter rules with the same trigger. A malformed rule is shown in the Lexwright top bar rather than crashing the editor.
+`@starter false` disables the built-in starter set. User rules with the same trigger as a starter rule override it.
+
+The synchronous expansion layer still requires replacements to be at least as long as their triggers. Arbitrary shortening belongs in a later transformation layer because egui's current TextBuffer insertion contract only reports forward cursor advance cleanly.
 
 ## Run
 
