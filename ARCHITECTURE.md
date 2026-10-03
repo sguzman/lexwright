@@ -27,7 +27,13 @@ The hot path must not perform:
 - serialization
 - work proportional to the whole document merely because one key was pressed
 
-The current egui-backed string storage is a bootstrap implementation, not the final large-document buffer architecture. Before large-ledger performance becomes a problem, the editor layer should move behind a buffer designed for incremental edits.
+The current editor storage is a contiguous Rust `String`, but Lexwright no longer delegates every insertion back through egui's generic String insertion helper.
+
+For an ASCII-only ledger, an egui character index is exactly the same number as the UTF-8 byte index. Lexwright tracks that invariant and uses the index directly in O(1). This is the expected fast path for ordinary English typing.
+
+If any non-ASCII text enters the document, Lexwright switches conservatively to UTF-8-aware index conversion. It does **not** rescan the whole document after deletions merely to see whether the final non-ASCII character disappeared.
+
+The contiguous String remains a bootstrap limitation: middle-of-document insertion still shifts trailing bytes. A real rope / piece table / gap-buffer architecture cannot be honestly obtained while stock egui `TextEdit` requires the whole document as a contiguous `&str`. The eventual large-document solution therefore includes a Lexwright-owned editor surface rather than repeatedly flattening a non-contiguous buffer.
 
 ## 2. Persistence
 
@@ -45,7 +51,7 @@ Current policy:
 
 The UI thread never performs the disk write.
 
-The current snapshot operation still clones the document string on the UI thread. That is acceptable only for the bootstrap. A future buffer/storage design must remove document-sized copying from routine editing.
+The current snapshot operation still clones the document string on the UI thread after the idle delay. Its duration is now measured explicitly. A future buffer/storage design must remove document-sized copying from routine persistence once measurements show it matters.
 
 ## 3. Programmable input
 
@@ -65,9 +71,25 @@ Current invariants:
 
 Starter rules are compiled into the binary. User rules are loaded once at startup from `$XDG_CONFIG_HOME/lexwright/expansions.tsv` (or `~/.config/lexwright/expansions.tsv`) and override starter rules by trigger.
 
-The current egui `TextBuffer` contract still uses character indices over a UTF-8 `String`; converting an insertion position to a byte position inherits egui/String's existing indexing cost. The trie itself adds only bounded local work. Replacing the bootstrap string buffer is therefore still a planned latency milestone.
+## 4. Measurement
 
-## 4. Analysis model
+Lexwright now records lightweight timing metrics for the actual code it controls:
+
+- process start -> first UI frame
+- frame CPU duration
+- editor insertion/mutation duration
+- expansion-trie lookup duration
+- ASCII O(1) vs UTF-8 fallback index counts
+- autosave snapshot-clone duration
+- background atomic-save duration
+
+The top bar exposes the latest edit timing and a hover tooltip exposes last / average / maximum values.
+
+These are **CPU-side instrumentation points**, not fabricated end-to-end latency. They do not include keyboard hardware scan time, compositor scheduling, display scanout, or pixel response.
+
+Instrumentation itself must remain cheap. The timing structure is fixed-size and updates without allocation; UI string formatting happens during normal UI construction, outside the buffer mutation itself.
+
+## 5. Analysis model
 
 Future language systems consume versioned document snapshots or edit deltas.
 
@@ -86,7 +108,7 @@ The UI discards or visually marks stale results rather than blocking for a curre
 
 No analyzer owns the canonical text.
 
-## 5. Failure isolation
+## 6. Failure isolation
 
 If a future subsystem fails:
 
@@ -98,22 +120,6 @@ If a future subsystem fails:
 - network is unavailable -> core editing is unaffected
 
 The editor is the load-bearing system. Everything else is optional machinery around it.
-
-## 6. Latency policy
-
-Lexwright does not claim a latency number without measuring it.
-
-We should instrument at least:
-
-- process start -> first interactive frame
-- input event -> completed editor frame
-- editor-frame CPU time
-- expansion lookup duration / hit count
-- save snapshot enqueue cost
-- background save duration
-- analyzer turnaround by revision
-
-Performance regressions should eventually be testable with a repeatable benchmark harness.
 
 ## 7. Dependency policy
 

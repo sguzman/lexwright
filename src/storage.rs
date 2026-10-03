@@ -6,6 +6,7 @@ use std::{
     process,
     sync::mpsc::{self, Receiver, Sender},
     thread,
+    time::{Duration, Instant},
 };
 
 enum Command {
@@ -15,8 +16,15 @@ enum Command {
 
 #[derive(Debug)]
 pub enum SaveEvent {
-    Saved(u64),
-    Failed { revision: u64, error: String },
+    Saved {
+        revision: u64,
+        elapsed: Duration,
+    },
+    Failed {
+        revision: u64,
+        elapsed: Duration,
+        error: String,
+    },
 }
 
 pub struct LedgerStore {
@@ -89,20 +97,28 @@ fn save_worker(path: PathBuf, command_rx: Receiver<Command>, event_tx: Sender<Sa
 
     while let Ok(command) = command_rx.recv() {
         match command {
-            Command::Save { revision, text } => match atomic_write(&path, text.as_bytes()) {
-                Ok(()) => {
-                    last_error = None;
-                    let _ = event_tx.send(SaveEvent::Saved(revision));
+            Command::Save { revision, text } => {
+                let started = Instant::now();
+                match atomic_write(&path, text.as_bytes()) {
+                    Ok(()) => {
+                        last_error = None;
+                        let _ = event_tx.send(SaveEvent::Saved {
+                            revision,
+                            elapsed: started.elapsed(),
+                        });
+                    }
+                    Err(error) => {
+                        let elapsed = started.elapsed();
+                        let message = error.to_string();
+                        last_error = Some((error.kind(), message.clone()));
+                        let _ = event_tx.send(SaveEvent::Failed {
+                            revision,
+                            elapsed,
+                            error: message,
+                        });
+                    }
                 }
-                Err(error) => {
-                    let message = error.to_string();
-                    last_error = Some((error.kind(), message.clone()));
-                    let _ = event_tx.send(SaveEvent::Failed {
-                        revision,
-                        error: message,
-                    });
-                }
-            },
+            }
             Command::Flush(reply_tx) => {
                 let result = match &last_error {
                     Some((kind, message)) => Err(io::Error::new(*kind, message.clone())),

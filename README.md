@@ -41,6 +41,8 @@ The instrument now has:
 - atomic background saves
 - visible save state
 - a latency-bounded abbreviation engine
+- hot-path latency telemetry
+- an O(1) character-to-byte index fast path for ordinary ASCII English
 - no linguistic analyzer on the input path
 
 The expansion matcher is compiled into a reversed trie. Typing an activation character such as a space or punctuation only walks backward through a possible trigger; it does not regex-scan or rescan the document.
@@ -63,6 +65,23 @@ woudl -> would
 Typing `bc `, for example, becomes `because ` immediately.
 
 Click the `expand on/off` indicator in the top bar to toggle expansion.
+
+## Latency telemetry
+
+The top bar now includes a compact `perf edit ...` readout. Hover it for:
+
+- process start -> first UI frame
+- frame CPU last / average / max
+- edit mutation CPU last / average / max
+- expansion trie lookup last / average / max
+- ASCII O(1) index-path hit rate
+- autosave snapshot-clone time
+- background atomic-save time
+- document byte size and active index path
+
+The telemetry intentionally distinguishes **CPU work inside Lexwright** from display/compositor latency. We do not claim end-to-end key-to-photon latency from numbers we cannot actually observe.
+
+For normal ASCII English, Lexwright maps egui character indices directly to byte indices in O(1). Once non-ASCII text enters the ledger, it conservatively uses UTF-8 character-index conversion rather than rescanning the entire document merely to decide whether the fast path can be re-enabled.
 
 ## Custom expansion rules
 
@@ -114,12 +133,20 @@ For testing or alternate ledgers:
 LEXWRIGHT_LEDGER=/path/to/ledger.txt cargo run --release
 ```
 
+## Buffer direction
+
+The current editor still uses a contiguous Rust `String` because egui's stock `TextEdit` exposes the document as a contiguous `&str`.
+
+That is excellent for the common case of typing at the end of an ASCII ledger: index mapping is O(1) and appending is amortized O(1). It is not the final answer for enormous documents with frequent edits in the middle, because inserting into the middle of a contiguous string must shift trailing bytes.
+
+Lexwright will not paper over that limitation with a fake "rope abstraction" while still flattening it for every frame. When large-document measurements justify the change, the correct next architecture is a Lexwright-owned editor surface backed by a piece table / rope / gap-oriented buffer.
+
 ## Roadmap
 
 Near-term work is intentionally ordered by dependency, not spectacle:
 
-- establish startup/edit/save latency instrumentation
-- replace the bootstrap `String` storage with a buffer designed for large ledgers
+- collect real latency measurements on normal and large ledgers
+- decide the custom editor-buffer boundary from those measurements
 - add in-app rule editing and named expansion rulesets
 - add spelling/grammar diagnostics (Harper-class behavior) asynchronously
 - add token/POS overlays and counts

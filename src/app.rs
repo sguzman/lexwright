@@ -4,11 +4,32 @@ use eframe::egui;
 
 use crate::{
     editor_buffer::EditorBuffer,
+    metrics::TimingMetric,
     storage::{LedgerStore, SaveEvent},
 };
 
 const AUTOSAVE_IDLE: Duration = Duration::from_millis(160);
 const SAVE_STATUS_POLL: Duration = Duration::from_millis(40);
+
+struct AppMetrics {
+    process_started: Instant,
+    first_ui: Option<Duration>,
+    frame_cpu: TimingMetric,
+    snapshot_clone: TimingMetric,
+    background_save: TimingMetric,
+}
+
+impl AppMetrics {
+    fn new(process_started: Instant) -> Self {
+        Self {
+            process_started,
+            first_ui: None,
+            frame_cpu: TimingMetric::default(),
+            snapshot_clone: TimingMetric::default(),
+            background_save: TimingMetric::default(),
+        }
+    }
+}
 
 pub struct LexwrightApp {
     buffer: EditorBuffer,
@@ -20,10 +41,11 @@ pub struct LexwrightApp {
     store: LedgerStore,
     path_label: String,
     focus_editor: bool,
+    metrics: AppMetrics,
 }
 
 impl LexwrightApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, process_started: Instant) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
 
         let store = LedgerStore::default();
@@ -46,6 +68,7 @@ impl LexwrightApp {
             store,
             path_label,
             focus_editor: true,
+            metrics: AppMetrics::new(process_started),
         }
     }
 
@@ -59,13 +82,19 @@ impl LexwrightApp {
     fn poll_save_events(&mut self) {
         while let Some(event) = self.store.poll() {
             match event {
-                SaveEvent::Saved(revision) => {
+                SaveEvent::Saved { revision, elapsed } => {
+                    self.metrics.background_save.observe(elapsed);
                     self.saved_revision = self.saved_revision.max(revision);
                     if revision >= self.revision {
                         self.save_error = None;
                     }
                 }
-                SaveEvent::Failed { revision, error } => {
+                SaveEvent::Failed {
+                    revision,
+                    elapsed,
+                    error,
+                } => {
+                    self.metrics.background_save.observe(elapsed);
                     if revision >= self.saved_revision {
                         self.save_error = Some(error);
                     }
@@ -80,7 +109,11 @@ impl LexwrightApp {
         }
 
         let revision = self.revision;
-        match self.store.queue_save(revision, self.buffer.text().to_owned()) {
+        let clone_started = Instant::now();
+        let snapshot = self.buffer.text().to_owned();
+        self.metrics.snapshot_clone.observe(clone_started.elapsed());
+
+        match self.store.queue_save(revision, snapshot) {
             Ok(()) => {
                 self.queued_revision = revision;
             }
@@ -143,10 +176,75 @@ impl LexwrightApp {
             ui.weak("expansion config error").on_hover_text(error);
         }
     }
+
+    fn show_perf_status(&self, ui: &mut egui::Ui) {
+        let insert = self.buffer.insert_timing();
+        let label = if insert.count() == 0 {
+            "perf ready".to_owned()
+        } else {
+            format!("perf edit {}", format_ns(insert.last_ns()))
+        };
+
+        let first_ui = self
+            .metrics
+            .first_ui
+            .map(|duration| format_ns(duration.as_nanos().min(u64::MAX as u128) as u64))
+            .unwrap_or_else(|| "pending".to_owned());
+
+        let expansion = self.buffer.expansion_lookup_timing();
+        let indexes = self.buffer.index_stats();
+        let total_indexes = indexes.ascii_fast.saturating_add(indexes.utf8_fallback);
+        let ascii_percent = if total_indexes == 0 {
+            0.0
+        } else {
+            indexes.ascii_fast as f64 * 100.0 / total_indexes as f64
+        };
+
+        let tooltip = format!(
+            "first UI: {first_ui}\n\
+             frame CPU last/avg/max: {}/{}/{}\n\
+             edit CPU last/avg/max: {}/{}/{}\n\
+             expansion lookup last/avg/max: {}/{}/{}\n\
+             index path: {:.1}% ASCII O(1) ({} fast / {} UTF-8 fallback)\n\
+             snapshot clone last/max: {}/{}\n\
+             background save last/max: {}/{}\n\
+             document: {} bytes · buffer path: {}",
+            format_ns(self.metrics.frame_cpu.last_ns()),
+            format_ns(self.metrics.frame_cpu.average_ns()),
+            format_ns(self.metrics.frame_cpu.max_ns()),
+            format_ns(insert.last_ns()),
+            format_ns(insert.average_ns()),
+            format_ns(insert.max_ns()),
+            format_ns(expansion.last_ns()),
+            format_ns(expansion.average_ns()),
+            format_ns(expansion.max_ns()),
+            ascii_percent,
+            indexes.ascii_fast,
+            indexes.utf8_fallback,
+            format_ns(self.metrics.snapshot_clone.last_ns()),
+            format_ns(self.metrics.snapshot_clone.max_ns()),
+            format_ns(self.metrics.background_save.last_ns()),
+            format_ns(self.metrics.background_save.max_ns()),
+            self.buffer.text().len(),
+            if self.buffer.is_ascii_fast_path() {
+                "ASCII fast"
+            } else {
+                "UTF-8 fallback"
+            },
+        );
+
+        ui.weak(label).on_hover_text(tooltip);
+    }
 }
 
 impl eframe::App for LexwrightApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let frame_started = Instant::now();
+
+        if self.metrics.first_ui.is_none() {
+            self.metrics.first_ui = Some(self.metrics.process_started.elapsed());
+        }
+
         self.poll_save_events();
         self.maybe_autosave();
 
@@ -161,6 +259,8 @@ impl eframe::App for LexwrightApp {
             self.show_save_status(ui);
             ui.separator();
             self.show_expansion_status(ui);
+            ui.separator();
+            self.show_perf_status(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak(&self.path_label);
@@ -184,10 +284,26 @@ impl eframe::App for LexwrightApp {
         if response.changed() {
             self.mark_edited(ui.ctx());
         }
+
+        self.metrics.frame_cpu.observe(frame_started.elapsed());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.queue_current_revision();
         let _ = self.store.flush();
+    }
+}
+
+fn format_ns(nanos: u64) -> String {
+    if nanos == 0 {
+        return "—".to_owned();
+    }
+
+    if nanos < 1_000 {
+        format!("{nanos} ns")
+    } else if nanos < 1_000_000 {
+        format!("{:.1} µs", nanos as f64 / 1_000.0)
+    } else {
+        format!("{:.2} ms", nanos as f64 / 1_000_000.0)
     }
 }
