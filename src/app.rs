@@ -43,16 +43,19 @@ impl AppMetrics {
 #[derive(Default)]
 struct RuleEditor {
     open: bool,
+    active_set: String,
     starter_enabled: bool,
     rules: Vec<ExpansionRule>,
     new_trigger: String,
     new_replacement: String,
+    new_set_name: String,
     status: Option<String>,
 }
 
 impl RuleEditor {
     fn load_from(&mut self, buffer: &EditorBuffer) {
         self.open = true;
+        self.active_set = buffer.expansion_active_set_name().to_owned();
         self.starter_enabled = buffer.expansion_starter_enabled();
         self.rules = buffer.expansion_user_rules().to_vec();
         self.new_trigger.clear();
@@ -489,7 +492,8 @@ impl LexwrightApp {
         };
 
         let response = ui.selectable_label(enabled, label).on_hover_text(format!(
-            "Click to toggle. User rules: {}",
+            "Click to toggle. Active ruleset: {:?}\nConfig: {}",
+            self.buffer.expansion_active_set_name(),
             self.buffer.expansion_config_path().display()
         ));
 
@@ -514,24 +518,79 @@ impl LexwrightApp {
         }
 
         let config_path = self.buffer.expansion_config_path().display().to_string();
+        let set_names = self.buffer.expansion_set_names();
+        let active_set = self.buffer.expansion_active_set_name().to_owned();
+        let mut requested_set = active_set.clone();
         let mut open = self.rule_editor.open;
         let mut apply = false;
         let mut revert = false;
+        let mut create_set = false;
+        let mut delete_set = false;
 
         egui::Window::new("Expansion rules")
             .open(&mut open)
-            .default_width(640.0)
+            .default_width(680.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.weak(&config_path);
                 ui.add_space(4.0);
 
+                ui.horizontal(|ui| {
+                    ui.strong("Ruleset");
+
+                    egui::ComboBox::from_id_salt("lexwright_expansion_ruleset")
+                        .selected_text(&requested_set)
+                        .show_ui(ui, |ui| {
+                            for name in &set_names {
+                                ui.selectable_value(
+                                    &mut requested_set,
+                                    name.clone(),
+                                    name,
+                                );
+                            }
+                        });
+
+                    ui.separator();
+                    ui.label("new");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.new_set_name)
+                            .desired_width(130.0)
+                            .hint_text("experiment"),
+                    );
+
+                    if ui
+                        .small_button("Clone active")
+                        .on_hover_text(
+                            "Create a new named ruleset from the currently applied active set and switch to it. Apply draft edits first if you want them included.",
+                        )
+                        .clicked()
+                    {
+                        create_set = true;
+                    }
+
+                    if set_names.len() > 1
+                        && ui
+                            .small_button("Delete active")
+                            .on_hover_text(
+                                "Delete the active ruleset. Lexwright will activate the first remaining set.",
+                            )
+                            .clicked()
+                    {
+                        delete_set = true;
+                    }
+                });
+
+                ui.weak(
+                    "Choosing another ruleset activates it immediately and discards unapplied draft edits in this window.",
+                );
+
+                ui.add_space(6.0);
                 ui.checkbox(
                     &mut self.rule_editor.starter_enabled,
                     "Enable the 10 starter rules",
                 )
                 .on_hover_text(
-                    "User rules override starter rules with the same trigger. Turn this off to build your expansion language from scratch.",
+                    "Starter-rule enablement belongs to this ruleset. User rules override starter rules with the same trigger.",
                 );
 
                 ui.add_space(6.0);
@@ -619,7 +678,8 @@ impl LexwrightApp {
                     }
 
                     ui.weak(format!(
-                        "{} draft user rules · starter rules {}",
+                        "{:?} · {} draft user rules · starter rules {}",
+                        self.rule_editor.active_set,
                         self.rule_editor.rules.len(),
                         if self.rule_editor.starter_enabled {
                             "on"
@@ -636,11 +696,64 @@ impl LexwrightApp {
 
                 ui.add_space(4.0);
                 ui.weak(
-                    "Rules are compiled only when you press Apply. Editing this window never enters the typing hot path.",
+                    "Rulesets are saved and compiled only by explicit actions here. Typing still sees one precompiled active trie.",
                 );
             });
 
         self.rule_editor.open = open;
+
+        if requested_set != active_set {
+            match self.buffer.select_expansion_set(&requested_set) {
+                Ok(()) => {
+                    self.rule_editor.load_from(&self.buffer);
+                    self.rule_editor.status =
+                        Some(format!("activated ruleset {requested_set:?}"));
+                }
+                Err(error) => {
+                    self.rule_editor.status =
+                        Some(format!("cannot activate ruleset: {error}"));
+                }
+            }
+            return;
+        }
+
+        if create_set {
+            let name = self.rule_editor.new_set_name.trim().to_owned();
+            if name.is_empty() {
+                self.rule_editor.status = Some("new ruleset name cannot be empty".to_owned());
+            } else {
+                match self.buffer.create_expansion_set_from_active(&name) {
+                    Ok(()) => {
+                        self.rule_editor.load_from(&self.buffer);
+                        self.rule_editor.new_set_name.clear();
+                        self.rule_editor.status =
+                            Some(format!("created and activated ruleset {name:?}"));
+                    }
+                    Err(error) => {
+                        self.rule_editor.status =
+                            Some(format!("cannot create ruleset: {error}"));
+                    }
+                }
+            }
+            return;
+        }
+
+        if delete_set {
+            match self.buffer.delete_active_expansion_set() {
+                Ok(removed) => {
+                    self.rule_editor.load_from(&self.buffer);
+                    self.rule_editor.status = Some(format!(
+                        "deleted ruleset {removed:?}; active ruleset is now {:?}",
+                        self.buffer.expansion_active_set_name()
+                    ));
+                }
+                Err(error) => {
+                    self.rule_editor.status =
+                        Some(format!("cannot delete ruleset: {error}"));
+                }
+            }
+            return;
+        }
 
         if revert {
             self.rule_editor.load_from(&self.buffer);
@@ -653,8 +766,11 @@ impl LexwrightApp {
 
             match self.buffer.apply_expansion_config(starter_enabled, rules) {
                 Ok(()) => {
+                    self.rule_editor.active_set =
+                        self.buffer.expansion_active_set_name().to_owned();
                     self.rule_editor.status = Some(format!(
-                        "saved and compiled {} active rules",
+                        "saved {:?} and compiled {} active rules",
+                        self.buffer.expansion_active_set_name(),
                         self.buffer.expansion_rule_count()
                     ));
                 }

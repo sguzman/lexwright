@@ -3,7 +3,7 @@ use std::{any::TypeId, ops::Range, time::Instant};
 use eframe::egui::{self, TextBuffer};
 
 use crate::{
-    expansion::{ExpansionConfig, ExpansionEngine, ExpansionRule, is_activation_char},
+    expansion::{ExpansionEngine, ExpansionRule, is_activation_char},
     metrics::TimingMetric,
 };
 
@@ -134,12 +134,20 @@ impl EditorBuffer {
         self.expansions.config_error()
     }
 
+    pub fn expansion_active_set_name(&self) -> &str {
+        self.expansions.active_set_name()
+    }
+
+    pub fn expansion_set_names(&self) -> Vec<String> {
+        self.expansions.set_names().map(ToOwned::to_owned).collect()
+    }
+
     pub fn expansion_starter_enabled(&self) -> bool {
-        self.expansions.config().starter_enabled
+        self.expansions.active_set().starter_enabled
     }
 
     pub fn expansion_user_rules(&self) -> &[ExpansionRule] {
-        &self.expansions.config().user_rules
+        &self.expansions.active_set().user_rules
     }
 
     pub fn apply_expansion_config(
@@ -147,10 +155,20 @@ impl EditorBuffer {
         starter_enabled: bool,
         user_rules: Vec<ExpansionRule>,
     ) -> Result<(), String> {
-        self.expansions.apply_config(ExpansionConfig {
-            starter_enabled,
-            user_rules,
-        })
+        self.expansions
+            .apply_active_set(starter_enabled, user_rules)
+    }
+
+    pub fn select_expansion_set(&mut self, name: &str) -> Result<(), String> {
+        self.expansions.select_set(name)
+    }
+
+    pub fn create_expansion_set_from_active(&mut self, name: &str) -> Result<(), String> {
+        self.expansions.create_set_from_active(name)
+    }
+
+    pub fn delete_active_expansion_set(&mut self) -> Result<String, String> {
+        self.expansions.delete_active_set()
     }
 
     fn byte_index_for_char(&mut self, char_index: egui::text::CharIndex) -> usize {

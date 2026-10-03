@@ -75,6 +75,8 @@ The in-app rule editor works on a detached draft. Editing the draft does not reb
 
 The config also persists whether the starter set is enabled. Turning starter rules off gives the user a blank expansion language without deleting their custom rules.
 
+Expansion configuration supports multiple named rulesets, but exactly one set is active. The active set alone is compiled into the reversed trie. Set creation, deletion, switching, validation, persistence, and trie rebuilds occur only through explicit rule-window actions; none of that work enters ordinary typing. Legacy flat `expansions.tsv` files are parsed as a single ruleset named `default` and migrate naturally when next saved.
+
 ## 4. Measurement
 
 Lexwright now records lightweight timing metrics for the actual code it controls:

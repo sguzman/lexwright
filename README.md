@@ -42,6 +42,7 @@ The instrument now has:
 - atomic background saves
 - visible save state
 - a latency-bounded abbreviation engine
+- named, switchable expansion rulesets
 - hot-path latency telemetry
 - an O(1) character-to-byte index fast path for ordinary ASCII English
 - a revision-tagged background analysis worker
@@ -200,7 +201,11 @@ Lexwright now has an in-app rule editor. Click **rules** beside the expansion st
 The panel lets you:
 
 - add, edit, and remove user rules
-- turn the starter rules on or off
+- keep multiple named expansion rulesets
+- clone the active ruleset into a new experiment
+- switch active rulesets explicitly
+- delete old experiments while always retaining at least one set
+- turn the starter rules on or off independently per ruleset
 - override a starter trigger with your own replacement
 - revert a draft back to the currently active rules
 - apply changes live without restarting Lexwright
@@ -221,16 +226,24 @@ or, when `XDG_CONFIG_HOME` is unset:
 
 Override the path with `LEXWRIGHT_EXPANSIONS`.
 
-The file remains intentionally simple and human-editable:
+The file remains intentionally simple and human-editable. Existing flat files still load as a ruleset named `default`; saving with the new system writes the named-set format:
 
 ```text
-# Lexwright expansion rules
+# Lexwright expansion rulesets
+@active	default
+
+@set	default
 @starter	true
 idk	I don't know
 fwiw	for what it's worth
+
+@set	aggressive
+@starter	false
+bc	because
+wld	would
 ```
 
-`@starter false` disables the built-in starter set. User rules with the same trigger as a starter rule override it.
+`@active` chooses the one ruleset compiled into the hot-path trie. Each `@set` owns its own starter-rule setting and user rules. User rules with the same trigger as a starter rule override it. Switching sets rebuilds only on the explicit UI action; normal typing still sees one precompiled matcher.
 
 The synchronous expansion layer still requires replacements to be at least as long as their triggers. Arbitrary shortening belongs in a later transformation layer because egui's current TextBuffer insertion contract only reports forward cursor advance cleanly.
 
@@ -297,7 +310,7 @@ Near-term work is intentionally ordered by dependency, not spectacle:
 
 - collect real latency measurements on normal and large ledgers
 - decide the custom editor-buffer boundary from those measurements
-- add in-app rule editing and named expansion rulesets
+- deepen expansion experimentation beyond named rulesets
 - deepen Harper incremental edit provenance beyond snapshot diffing
 - deepen token/POS accuracy beyond the current heuristic overlay
 - deepen lexeme/morpheme inspection beyond conservative normalization rules
