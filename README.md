@@ -43,7 +43,7 @@ The instrument now has:
 - visible save state
 - a latency-bounded abbreviation engine
 - named, switchable expansion rulesets
-- per-ruleset session compression telemetry
+- per-ruleset and per-rule session compression telemetry
 - hot-path latency telemetry
 - an O(1) character-to-byte index fast path for ordinary ASCII English
 - a revision-tagged background analysis worker
@@ -246,7 +246,7 @@ wld	would
 
 `@active` chooses the one ruleset compiled into the hot-path trie. Each `@set` owns its own starter-rule setting and user rules. User rules with the same trigger as a starter rule override it. Switching sets rebuilds only on the explicit UI action; normal typing still sees one precompiled matcher.
 
-Lexwright also keeps **session-only compression telemetry per ruleset**. Hover the expansion control for the active set, or inspect the rules window's comparison table to see every set side by side: expansion hits, trigger characters typed, replacement characters produced, percentage of expanded-word characters actually typed, and characters avoided. Zero-hit sets remain visible so experiments have an explicit baseline. Saving a changed ruleset automatically clears that set's prior session measurements so two different rule definitions are never silently blended; the rules window also has an explicit **Reset active stats** action. These counters update only when an expansion succeeds; they do not add work to ordinary non-expanding keystrokes.
+Lexwright also keeps **session-only compression telemetry per ruleset**. Hover the expansion control for the active set, or inspect the rules window's comparison table to see every set side by side: expansion hits, trigger characters typed, replacement characters produced, percentage of expanded-word characters actually typed, and characters avoided. Zero-hit sets remain visible so experiments have an explicit baseline. Saving a changed ruleset automatically clears that set's prior session measurements so two different rule definitions are never silently blended; the rules window also has an explicit **Reset active stats** action. User-rule rows show their own hit and avoided-character counts, making dead or high-value abbreviations visible directly beside the rule definition. These counters update only when an expansion succeeds; they do not add work to ordinary non-expanding keystrokes.
 
 The synchronous expansion layer still requires replacements to be at least as long as their triggers. Arbitrary shortening belongs in a later transformation layer because egui's current TextBuffer insertion contract only reports forward cursor advance cleanly.
 
