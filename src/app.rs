@@ -798,7 +798,8 @@ impl LexwrightApp {
 
         if discard_draft {
             self.rule_editor.load_from(&self.buffer);
-            self.rule_editor.status = Some("discarded draft; reloaded saved active rules".to_owned());
+            self.rule_editor.status =
+                Some("discarded draft; reloaded saved active rules".to_owned());
         }
 
         if save_activate {
@@ -816,8 +817,7 @@ impl LexwrightApp {
                     ));
                 }
                 Err(error) => {
-                    self.rule_editor.status =
-                        Some(format!("cannot save & activate: {error}"));
+                    self.rule_editor.status = Some(format!("cannot save & activate: {error}"));
                 }
             }
         }
