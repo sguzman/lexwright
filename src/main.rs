@@ -10,6 +10,7 @@ mod navigation;
 mod probe;
 mod settings;
 mod storage;
+mod workspace;
 
 use std::time::Instant;
 
