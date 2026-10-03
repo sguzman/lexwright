@@ -324,8 +324,7 @@ impl LexwrightApp {
             .replace_byte_range(edit.start_byte..edit.end_byte, &edit.replacement)
         {
             Ok(cursor_char) => {
-                let cursor =
-                    egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_char));
+                let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_char));
                 state.cursor.set_char_range(Some(cursor));
                 state.set_undoer(undoer);
                 state.store(ctx, editor_id);
@@ -338,8 +337,7 @@ impl LexwrightApp {
                 ));
             }
             Err(error) => {
-                self.harper_action_status =
-                    Some(format!("could not apply suggestion: {error}"));
+                self.harper_action_status = Some(format!("could not apply suggestion: {error}"));
             }
         }
     }
