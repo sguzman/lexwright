@@ -3,6 +3,7 @@ mod app;
 mod editor_buffer;
 mod expansion;
 mod harper;
+mod jitter;
 mod metrics;
 mod probe;
 mod storage;

@@ -10,6 +10,7 @@ use crate::{
     editor_buffer::{EditDelta, EditorBuffer},
     expansion::ExpansionRule,
     harper::{HarperDiagnostic, HarperResult, HarperSuggestion, HarperWorker},
+    jitter::{JitterFrame, JitterRecorder},
     metrics::TimingMetric,
     storage::{LedgerStore, SaveEvent},
 };
@@ -99,6 +100,7 @@ pub struct LexwrightApp {
     harper_action_status: Option<String>,
     snapshot_revision: Option<u64>,
     snapshot_cache: Option<Arc<str>>,
+    jitter_recorder: JitterRecorder,
 }
 
 impl LexwrightApp {
@@ -161,6 +163,7 @@ impl LexwrightApp {
             harper_action_status: None,
             snapshot_revision: Some(0),
             snapshot_cache: Some(initial_snapshot),
+            jitter_recorder: JitterRecorder::new(),
         }
     }
 
@@ -1073,6 +1076,7 @@ impl LexwrightApp {
              index path: {:.1}% ASCII O(1) ({} fast / {} UTF-8 fallback)\n\
              snapshot clone last/max: {}/{}\n\
              background save last/max: {}/{}\n\
+             editor trace: {}\n\
              document: {} bytes · buffer path: {}",
             format_ns(self.metrics.frame_cpu.last_ns()),
             format_ns(self.metrics.frame_cpu.average_ns()),
@@ -1090,6 +1094,7 @@ impl LexwrightApp {
             format_ns(self.metrics.snapshot_clone.max_ns()),
             format_ns(self.metrics.background_save.last_ns()),
             format_ns(self.metrics.background_save.max_ns()),
+            self.jitter_recorder.path().display(),
             self.buffer.text().len(),
             if self.buffer.is_ascii_fast_path() {
                 "ASCII fast"
@@ -1254,6 +1259,43 @@ impl eframe::App for LexwrightApp {
         if self.focus_editor {
             response.request_focus();
             self.focus_editor = false;
+        }
+
+        let should_trace = response.changed()
+            || self
+                .last_edit
+                .is_some_and(|last_edit| last_edit.elapsed() <= Duration::from_millis(500));
+
+        if should_trace {
+            let (cursor_index, cursor_row, cursor_column) =
+                output.cursor_range.map_or((usize::MAX, usize::MAX, usize::MAX), |range| {
+                    let layout = output.galley.layout_from_cursor(range.primary);
+                    (range.primary.index.0, layout.row, layout.column.0)
+                });
+
+            self.jitter_recorder.record(JitterFrame {
+                elapsed_us: self.metrics.process_started.elapsed().as_micros(),
+                revision: self.revision,
+                changed: response.changed(),
+                editor_x: response.rect.min.x,
+                editor_y: response.rect.min.y,
+                editor_w: response.rect.width(),
+                editor_h: response.rect.height(),
+                galley_x: output.galley_pos.x,
+                galley_y: output.galley_pos.y,
+                galley_w: output.galley.size().x,
+                galley_h: output.galley.size().y,
+                wrap_w: output.galley.job.wrap.max_width,
+                rows: output.galley.rows.len(),
+                cursor_index,
+                cursor_row,
+                cursor_column,
+                queued_revision: self.queued_revision,
+                saved_revision: self.saved_revision,
+                analysis_revision: self.analysis_latest.as_ref().map(|analysis| analysis.revision),
+                harper_revision: self.harper_latest.as_ref().map(|result| result.revision),
+                expansion_hits: self.buffer.expansion_hits(),
+            });
         }
 
         self.metrics.frame_cpu.observe(frame_started.elapsed());
