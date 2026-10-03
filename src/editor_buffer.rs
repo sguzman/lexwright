@@ -213,7 +213,8 @@ impl EditorBuffer {
 
     pub fn create_expansion_set_from_active(&mut self, name: &str) -> Result<(), String> {
         self.expansions.create_set_from_active(name)?;
-        self.expansion_stats.retain(|(candidate, _)| candidate != name);
+        self.expansion_stats
+            .retain(|(candidate, _)| candidate != name);
         Ok(())
     }
 
