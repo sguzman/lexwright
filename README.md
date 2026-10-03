@@ -45,6 +45,8 @@ The instrument now has:
 - named, switchable expansion rulesets with notes and rename
 - per-ruleset and per-rule session compression telemetry
 - exportable Markdown expansion-session reports
+- durable cursor ergonomics controls
+- opt-in, non-mutating Vim-lite navigation
 - hot-path latency telemetry
 - an O(1) character-to-byte index fast path for ordinary ASCII English
 - a revision-tagged background analysis worker
@@ -263,6 +265,53 @@ or `~/.local/state/lexwright/expansion-session.md` when `XDG_STATE_HOME` is unse
 
 The synchronous expansion layer still requires replacements to be at least as long as their triggers. Arbitrary shortening belongs in a later transformation layer because egui's current TextBuffer insertion contract only reports forward cursor advance cleanly.
 
+## Editor ergonomics
+
+Lexwright has a deliberately small editor-ergonomics layer that does not replace the stock text-layout path.
+
+Click the fixed **cursor** control in the top bar to configure:
+
+- cursor stroke width from 0.5 px to 12 px
+- cursor blinking on/off
+- visible and hidden blink durations
+- opt-in Vim-lite navigation
+
+Settings are durable at:
+
+```text
+$XDG_CONFIG_HOME/lexwright/editor.tsv
+```
+
+or:
+
+```text
+~/.config/lexwright/editor.tsv
+```
+
+The cursor controls use egui's built-in `TextCursorStyle`; Lexwright does not custom-paint or reshape the cursor. This intentionally gives us safe width/blink customization without touching text geometry. Arbitrary cursor-height customization is deferred unless it can be done without replacing the stable editor/cursor paint path.
+
+### Vim-lite
+
+Vim-lite is intentionally **not Vim emulation**. It is a small navigation layer for moving around English text while retaining Lexwright's normal editor.
+
+When enabled in **cursor → Editor ergonomics**:
+
+```text
+Esc      INSERT -> NAV
+i        NAV -> INSERT
+
+h / j / k / l   character / wrapped-row movement
+w / b           next / previous word start
+0 / $           wrapped-row start / end
+gg / G           document start / end
+```
+
+The top bar shows **INS** or **NAV** while Vim-lite is enabled. The mode button can also be clicked to toggle modes.
+
+NAV is deliberately non-mutating. While the main editor has focus, NAV consumes text input, IME composition, paste, cut, Backspace, Delete, Enter, Tab, and common mutating Ctrl/Cmd shortcuts before `TextEdit` can process them. There are no `x`, `dd`, operators, registers, macros, command line, or hidden Vim behaviors.
+
+Vim-lite moves egui's existing `TextEditState` cursor. It does not replace the editor widget, buffer, layout, wrapping, persistence, or analyzer paths.
+
 ## Incident memory
 
 Severe editor failures are documented under [`docs/incidents/`](docs/incidents/README.md).
@@ -326,6 +375,7 @@ Near-term work is intentionally ordered by dependency, not spectacle:
 
 - collect real latency measurements on normal and large ledgers
 - decide the custom editor-buffer boundary from those measurements
+- define the per-document state boundary for durable tabs
 - deepen expansion experimentation beyond named rulesets
 - deepen Harper incremental edit provenance beyond snapshot diffing
 - deepen token/POS accuracy beyond the current heuristic overlay

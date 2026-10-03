@@ -232,3 +232,38 @@ Escalation policy:
 7. Keep a successful diagnostic recorder available through subsequent feature work.
 
 The editor geometry recorder writes edit-adjacent frames to `$XDG_STATE_HOME/lexwright/editor-trace.tsv` or `~/.local/state/lexwright/editor-trace.tsv`.
+
+
+## 11. Editor ergonomics and Vim-lite
+
+Editor ergonomics may customize interaction, but they do not receive permission to destabilize the writing surface.
+
+Cursor configuration is stored separately from document data in `$XDG_CONFIG_HOME/lexwright/editor.tsv` (or `~/.config/lexwright/editor.tsv`). Cursor width and blink timing are applied through egui's native `TextCursorStyle`. Lexwright does not custom-paint the main cursor merely to offer cosmetic settings.
+
+The top-bar cursor control has a geometry-stable label. As established by the 2026-10-03 geometry incident, dynamic editor settings/status text must not determine the editor viewport width.
+
+Vim-lite is an optional navigation adapter over the existing `TextEditState`, not a second editor and not a Vim implementation.
+
+Current mode contract:
+
+- INSERT is the ordinary Lexwright editor
+- Escape moves from INSERT to NAV
+- `i` moves from NAV to INSERT
+- NAV supports `h/j/k/l`, `w/b`, `0/$`, and `gg/G`
+- wrapped-row vertical/start/end movement uses the already-laid-out egui galley
+- word movement operates on canonical text but never mutates it
+- cursor movement stores a new egui cursor range under the existing stable editor ID
+- NAV does not create Lexwright document revisions because cursor movement is not a text mutation
+
+NAV is fail-closed against mutation. When the main editor owns focus, the input adapter removes text, IME, paste, cut, deletion/newline/tab input, and common mutating undo/cut/paste/delete-word shortcuts before stock `TextEdit` receives the frame. Unsupported printable NAV keys therefore do nothing instead of inserting text.
+
+This layer must remain small. Full Vim operators, registers, macros, command mode, configuration language, or modal editing semantics are outside the current contract unless individually justified by Lexwright's writing goals.
+
+## 12. Tabs boundary
+
+Tabs are the next larger editor-ergonomics feature, but they are not merely UI chrome.
+
+A real Lexwright tab must own a durable document identity plus the state currently modeled globally: canonical text/buffer, save generation, analysis generations, cursor state, and any document-specific observational state. Before tabs are implemented, those responsibilities must be factored into a per-document state object without changing the stable single-document typing path.
+
+Tabs must not be implemented as multiple labels that secretly share one global ledger.
+
