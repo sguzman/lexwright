@@ -94,10 +94,11 @@ impl Workspace {
             return Ok(());
         }
 
-        let next_document = self.tabs[target_index]
-            .loaded
-            .take()
-            .unwrap_or_else(|| DocumentState::load_path(self.tabs[target_index].path.clone()));
+        let target_path = self.tabs[target_index].path.clone();
+        let next_document = match self.tabs[target_index].loaded.take() {
+            Some(document) => document,
+            None => DocumentState::load_path(target_path),
+        };
 
         let previous_index = self.active_index;
         let previous_document = std::mem::replace(active_document, next_document);
@@ -260,7 +261,7 @@ fn save_registry(path: &Path, tabs: &[TabEntry], active_index: usize) -> Result<
             ));
         };
 
-        if path_text.contains(['\t', '\n', '\r']) {
+        if path_text.contains('\t') || path_text.contains('\n') || path_text.contains('\r') {
             return Err(format!(
                 "cannot persist document path containing tab/newline: {}",
                 tab.path.display()
