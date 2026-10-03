@@ -677,16 +677,13 @@ impl LexwrightApp {
         };
 
         let stale = analysis.revision < self.revision;
-        let label = if stale {
-            format!("words {} · analyzing", analysis.words)
-        } else {
-            format!("words {}", analysis.words)
-        };
+        let label = format!("words {}", analysis.words);
 
         ui.weak(label).on_hover_text(format!(
-            "revision: {}{}\nwords: {}\ncharacters: {}\nbytes: {}\nlines: {}\nparagraphs: {}\nanalysis CPU: {}",
+            "revision: {}{}\nstatus: {}\nwords: {}\ncharacters: {}\nbytes: {}\nlines: {}\nparagraphs: {}\nanalysis CPU: {}",
             analysis.revision,
             if stale { " (stale)" } else { "" },
+            if stale { "analyzing" } else { "current" },
             analysis.words,
             analysis.chars,
             analysis.bytes,
@@ -1111,6 +1108,11 @@ impl eframe::App for LexwrightApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
 
+        // The status bar contains dynamic text. In egui, a widget wider than max_rect
+        // can expand the parent Ui's max_rect. Never derive editor width after rendering
+        // that bar or status-string changes will rewrap the entire document.
+        let editor_viewport_width = ui.available_width();
+
         if self.metrics.first_ui.is_none() {
             self.metrics.first_ui = Some(self.metrics.process_started.elapsed());
         }
@@ -1187,7 +1189,7 @@ impl eframe::App for LexwrightApp {
             None
         };
 
-        let editor_size = ui.available_size();
+        let editor_size = egui::vec2(editor_viewport_width, ui.available_height());
 
         // Restore the exact geometry contract Lexwright used before the editor-jitter
         // regressions: desired_width(INFINITY) inside the same centered-and-justified
