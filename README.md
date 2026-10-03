@@ -4,7 +4,7 @@
 
 It is a native, latency-first writing instrument for writing, inspecting, transforming, and experimenting with English in real time.
 
-The first product is deliberately small: open Lexwright, type into a durable local ledger, close it whenever you want, and come back to the same text. No save ritual. No browser. No network dependency.
+The first product is deliberately small: open Lexwright, type into durable local documents, switch between them without a save ritual, close the app whenever you want, and come back to the same workspace. No browser. No network dependency.
 
 ## Principles
 
@@ -37,7 +37,7 @@ Only the first two layers are allowed to participate synchronously in normal edi
 The instrument now has:
 
 - native Rust + egui/eframe application
-- one always-present ledger
+- durable local document tabs with one always-present fallback ledger
 - automatic local persistence
 - atomic background saves
 - visible save state
@@ -47,7 +47,7 @@ The instrument now has:
 - exportable Markdown expansion-session reports
 - durable cursor ergonomics controls
 - opt-in, non-mutating Vim-lite navigation
-- explicit per-document state boundary for future durable tabs
+- lazy-loaded per-document state with independent persistence/analyzer generations
 - hot-path latency telemetry
 - an O(1) character-to-byte index fast path for ordinary ASCII English
 - a revision-tagged background analysis worker
@@ -313,6 +313,34 @@ NAV is deliberately non-mutating. While the main editor has focus, NAV consumes 
 
 Vim-lite moves egui's existing `TextEditState` cursor. It does not replace the editor widget, buffer, layout, wrapping, persistence, or analyzer paths.
 
+## Document tabs
+
+Lexwright now has durable document tabs below the main status bar. Tabs are real documents, not alternate labels over one shared buffer.
+
+The existing default ledger remains the fallback first document. Click **+** to create and activate a new durable document. New untitled documents are allocated under:
+
+```text
+$XDG_DATA_HOME/lexwright/documents/untitled-N.txt
+```
+
+or `~/.local/share/lexwright/documents/untitled-N.txt` when `XDG_DATA_HOME` is unset.
+
+The durable workspace registry lives at:
+
+```text
+$XDG_DATA_HOME/lexwright/workspace.tsv
+```
+
+or `~/.local/share/lexwright/workspace.tsv`. Override that registry path with `LEXWRIGHT_WORKSPACE`.
+
+Only the active document is loaded at startup. An inactive tab is loaded lazily the first time it is activated; once loaded, it retains its own buffer, revision/save clocks, snapshot cache, analysis state, Harper state, and background persistence worker. Switching tabs queues the outgoing document's current revision before the swap so unsaved text is not stranded.
+
+Each document also gets its own stable egui editor ID derived from its durable path, which isolates cursor and undo state across tabs. Vim-lite resets to INSERT on a document switch rather than carrying modal state into another document.
+
+Close/delete/reorder semantics are deliberately not implemented yet. A tab currently represents durable user data, so Lexwright will not make a close button ambiguously mean hide, unload, or delete until that lifecycle is specified explicitly.
+
+Expansion rules are still stored in the global expansion configuration, while runtime expansion state/telemetry lives inside each loaded document buffer. Already-loaded tabs are therefore not forcibly hot-reloaded when another tab saves rule changes; this avoids silently mixing per-document experiment sessions until cross-document rule synchronization has an explicit policy.
+
 ## Incident memory
 
 Severe editor failures are documented under [`docs/incidents/`](docs/incidents/README.md).
@@ -356,11 +384,13 @@ or, when `XDG_DATA_HOME` is unset:
 ~/.local/share/lexwright/ledger.txt
 ```
 
-For testing or alternate ledgers:
+For testing or alternate initial ledgers:
 
 ```bash
 LEXWRIGHT_LEDGER=/path/to/ledger.txt cargo run --release
 ```
+
+Once a workspace registry exists, its registered tabs are authoritative for that workspace. To test with a separate tab registry as well, set `LEXWRIGHT_WORKSPACE` to a different path.
 
 ## Buffer direction
 
@@ -376,7 +406,7 @@ Near-term work is intentionally ordered by dependency, not spectacle:
 
 - collect real latency measurements on normal and large ledgers
 - decide the custom editor-buffer boundary from those measurements
-- build the durable tab/workspace layer on the new per-document state boundary
+- define explicit close/reopen/reorder lifecycle semantics for durable document tabs
 - deepen expansion experimentation beyond named rulesets
 - deepen Harper incremental edit provenance beyond snapshot diffing
 - deepen token/POS accuracy beyond the current heuristic overlay
