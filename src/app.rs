@@ -1298,8 +1298,8 @@ fn paint_harper_underlines(
             if start < end {
                 let local_start = start - row_start;
                 let local_end = end - row_start;
-                let x1 = galley_pos.x + row.pos.x + row.x_offset(local_start);
-                let x2 = galley_pos.x + row.pos.x + row.x_offset(local_end);
+                let x1 = galley_pos.x + row.pos.x + row.x_offset(egui::text::CharIndex(local_start));
+                let x2 = galley_pos.x + row.pos.x + row.x_offset(egui::text::CharIndex(local_end));
                 let y = galley_pos.y + row.pos.y + row.max_y() - 1.0;
 
                 if x2 > x1 {
