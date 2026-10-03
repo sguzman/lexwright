@@ -322,12 +322,11 @@ fn has_left_boundary(prefix: &str, start_byte: usize) -> bool {
 }
 
 fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '_' | ''')
+    ch.is_alphanumeric() || matches!(ch, '_' | '\'')
 }
 
 fn has_tsv_control(text: &str) -> bool {
-    text.chars().any(|ch| matches!(ch, '	' | '
-' | ''))
+    text.chars().any(|ch| matches!(ch, '\t' | '\n' | '\r'))
 }
 
 fn validate_set_name(name: &str) -> Result<(), String> {
@@ -437,7 +436,7 @@ fn load_config(path: &Path) -> Result<ExpansionConfig, String> {
 fn parse_config(contents: &str, path: &Path) -> Result<ExpansionConfig, String> {
     let has_named_sets = contents.lines().any(|raw_line| {
         raw_line
-            .split_once('	')
+            .split_once('\t')
             .is_some_and(|(key, _)| key == "@set")
     });
 
@@ -452,7 +451,7 @@ fn parse_config(contents: &str, path: &Path) -> Result<ExpansionConfig, String> 
                 continue;
             }
 
-            let Some((trigger, replacement)) = raw_line.split_once('	') else {
+            let Some((trigger, replacement)) = raw_line.split_once('\t') else {
                 return Err(format!(
                     "{}:{line_number}: expected trigger<TAB>replacement",
                     path.display()
@@ -460,7 +459,8 @@ fn parse_config(contents: &str, path: &Path) -> Result<ExpansionConfig, String> 
             };
 
             if trigger == "@starter" {
-                set.starter_enabled = parse_bool_directive(path, line_number, "@starter", replacement)?;
+                set.starter_enabled =
+                    parse_bool_directive(path, line_number, "@starter", replacement)?;
                 continue;
             }
 
@@ -497,7 +497,7 @@ fn parse_config(contents: &str, path: &Path) -> Result<ExpansionConfig, String> 
             continue;
         }
 
-        let Some((key, value)) = raw_line.split_once('	') else {
+        let Some((key, value)) = raw_line.split_once('\t') else {
             return Err(format!(
                 "{}:{line_number}: expected key<TAB>value",
                 path.display()
@@ -585,35 +585,28 @@ fn save_config(path: &Path, config: &ExpansionConfig) -> Result<(), String> {
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
     }
 
-    let mut contents = String::from("# Lexwright expansion rulesets
-");
-    contents.push_str("@active	");
+    let mut contents = String::from("# Lexwright expansion rulesets\n");
+    contents.push_str("@active\t");
     contents.push_str(&config.active_set);
-    contents.push('
-');
+    contents.push('\n');
 
     for set in &config.sets {
-        contents.push('
-');
-        contents.push_str("@set	");
+        contents.push('\n');
+        contents.push_str("@set\t");
         contents.push_str(&set.name);
-        contents.push('
-');
-        contents.push_str("@starter	");
+        contents.push('\n');
+        contents.push_str("@starter\t");
         contents.push_str(if set.starter_enabled {
-            "true
-"
+            "true\n"
         } else {
-            "false
-"
+            "false\n"
         });
 
         for rule in &set.user_rules {
             contents.push_str(&rule.trigger);
-            contents.push('	');
+            contents.push('\t');
             contents.push_str(&rule.replacement);
-            contents.push('
-');
+            contents.push('\n');
         }
     }
 
@@ -763,10 +756,7 @@ mod tests {
     #[test]
     fn legacy_flat_config_migrates_to_default_set_in_memory() {
         let config = parse_config(
-            "# old file
-@starter	false
-bc	because
-",
+            "# old file\n@starter\tfalse\nbc\tbecause\n",
             Path::new("legacy.tsv"),
         )
         .expect("legacy config failed");
@@ -780,15 +770,7 @@ bc	because
     #[test]
     fn parses_named_rulesets_and_active_selection() {
         let config = parse_config(
-            "@active	compressed
-
-@set	default
-@starter	true
-
-@set	compressed
-@starter	false
-bc	because
-",
+            "@active\tcompressed\n\n@set\tdefault\n@starter\ttrue\n\n@set\tcompressed\n@starter\tfalse\nbc\tbecause\n",
             Path::new("sets.tsv"),
         )
         .expect("named config failed");
