@@ -124,9 +124,13 @@ No analyzer owns the canonical text. No analyzer may synchronously mutate it.
 
 The same background pass now emits non-overlapping prefix/stem/suffix byte spans for words that match a deliberately conservative surface-affix inventory. Up to two prefix and two suffix layers can be represented.
 
-This is orthographic segmentation only. The middle span is called a **stem**, not a lexeme, because spelling alternations and lexical exceptions are not yet normalized. A future lemmatization layer may derive `happy` from `happi + ness` or `run` from `runn + ing`, but that inference must remain separate from the surface spans actually present in the document.
+The colored spans remain orthographic segmentation: the middle span is a **surface stem**, not canonical text. A separate lexeme-candidate layer may normalize only when a conservative spelling rule applies. Initial rules handle `i -> y` before suffixes such as `-ness`, undoubling selected final consonants before inflectional suffixes, and restoring final `e` in narrowly recognized cases such as `believ + able`.
 
-Morphology visualization is mutually exclusive with the lexical-category overlay and remains opt-in, preserving the normal editor path.
+Each lexeme candidate stores both the original word/stem byte ranges and the derived string. This preserves provenance: the UI can show exactly which document bytes produced a candidate without rewriting or pretending those normalized bytes exist in the ledger.
+
+Obvious lexical exceptions are filtered before segmentation when a productive-looking suffix is actually part of the lexical base (for example `something`).
+
+Morphology visualization is mutually exclusive with the lexical-category overlay and remains opt-in, preserving the normal editor path. Lexeme inspection is observational and uses the same revision gate.
 
 
 ## 6. Failure isolation

@@ -48,6 +48,8 @@ The instrument now has:
 - an optional lexical-structure color overlay
 - grammatical-category counts with explicit heuristic labeling
 - an optional prefix/stem/suffix morphology overlay
+- conservative lexeme candidates with spelling-alternation rules
+- a lexeme-inspection window
 - one immutable snapshot shared by autosave and analysis
 - no linguistic analyzer on the input path
 
@@ -108,7 +110,7 @@ The UI thread copies the ledger once. Persistence and analysis share that immuta
 
 Analysis results carry the revision they observed. If the user edits again while analysis is running, the UI can identify the result as stale instead of blocking for a fresh answer. The worker also collapses queued stale jobs to the newest waiting snapshot before beginning its next pass.
 
-The current analyzer intentionally makes only mechanical text counts. POS tagging, morphology, and Harper-class diagnostics will plug into this same worker boundary later; none of them get permission to enter the keystroke path.
+The current analyzer now produces mechanical counts, lexical-category spans, morphology spans, and conservative lexeme candidates. Harper-class diagnostics and richer tagging can plug into the same worker boundary later; none of them get permission to enter the keystroke path.
 
 
 ## Structure overlay
@@ -142,9 +144,11 @@ un | help | ful | ness
 
 The three visual roles are **prefix**, **stem**, and **suffix**. Hover the morph control for counts of decomposed words, prefixes, and suffixes.
 
-This is explicitly **surface/orthographic morphology**, not full lemmatization. Lexwright does not yet claim that `happi` in `happiness` has been normalized to the lexeme `happy`, or that `runn` in `running` has been normalized to `run`. Those spelling alternations belong in the next lexical layer.
+The colored morphology remains explicitly **surface/orthographic morphology**. A separate observational lexeme layer now derives conservative candidates from that surface segmentation. Initial normalization rules include `happi + ness -> happy`, `runn + ing -> run`, and `believ + able -> believe`. The surface bytes remain canonical and are never rewritten by this analysis.
 
-Like the structure overlay, morphology is computed on the background analysis worker and rendered only when its revision exactly matches the current ledger.
+Click **lexemes N** in the top bar to inspect the current candidates, their surface stems, and the rule used. Obvious false suffix words such as `something`, `nothing`, `everything`, and `anything` are excluded from the morphology pass.
+
+Like the structure overlay, morphology and lexeme derivation are computed on the background analysis worker and exposed only when their revision exactly matches the current ledger.
 
 
 
@@ -244,8 +248,8 @@ Near-term work is intentionally ordered by dependency, not spectacle:
 - decide the custom editor-buffer boundary from those measurements
 - add in-app rule editing and named expansion rulesets
 - add spelling/grammar diagnostics (Harper-class behavior) asynchronously
-- add token/POS overlays and counts
-- add lexeme/morpheme inspection
+- deepen token/POS accuracy beyond the current heuristic overlay
+- deepen lexeme/morpheme inspection beyond conservative normalization rules
 - add named experimental English modes and transformation pipelines
 
 See `ARCHITECTURE.md` for the invariants that future features must preserve.

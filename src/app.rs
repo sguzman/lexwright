@@ -75,6 +75,7 @@ pub struct LexwrightApp {
     analysis_error: Option<String>,
     structure_overlay: bool,
     morphology_overlay: bool,
+    lexeme_window: bool,
 }
 
 impl LexwrightApp {
@@ -117,6 +118,7 @@ impl LexwrightApp {
             analysis_error,
             structure_overlay: false,
             morphology_overlay: false,
+            lexeme_window: false,
         }
     }
 
@@ -528,6 +530,99 @@ impl LexwrightApp {
         }
     }
 
+
+    fn show_lexeme_status(&mut self, ui: &mut egui::Ui) {
+        let current = self
+            .analysis_latest
+            .as_ref()
+            .filter(|analysis| analysis.revision == self.revision);
+
+        let count = current.map_or(0, |analysis| analysis.lexeme_candidates.len());
+        let label = if current.is_some() {
+            format!("lexemes {count}")
+        } else {
+            "lexemes …".to_owned()
+        };
+
+        let response = ui
+            .small_button(label)
+            .on_hover_text(
+                "Open conservative lexeme candidates derived from the current morphology pass. Candidates never rewrite the ledger.",
+            );
+
+        if response.clicked() {
+            self.lexeme_window = !self.lexeme_window;
+        }
+    }
+
+    fn show_lexeme_window(&mut self, ctx: &egui::Context) {
+        if !self.lexeme_window {
+            return;
+        }
+
+        let mut open = self.lexeme_window;
+
+        egui::Window::new("Lexeme candidates")
+            .open(&mut open)
+            .default_width(540.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.weak(
+                    "Derived candidates only. The surface bytes remain canonical; normalization is observational.",
+                );
+                ui.add_space(6.0);
+
+                let Some(analysis) = self
+                    .analysis_latest
+                    .as_ref()
+                    .filter(|analysis| analysis.revision == self.revision)
+                else {
+                    ui.weak("Waiting for analysis of the current revision.");
+                    return;
+                };
+
+                if analysis.lexeme_candidates.is_empty() {
+                    ui.weak("No morphology-derived lexeme candidates in this revision.");
+                    return;
+                }
+
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("lexwright_lexeme_grid")
+                            .num_columns(4)
+                            .striped(true)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("word");
+                                ui.strong("surface stem");
+                                ui.strong("lexeme");
+                                ui.strong("rule");
+                                ui.end_row();
+
+                                for candidate in analysis.lexeme_candidates.iter() {
+                                    let text = self.buffer.text();
+
+                                    let word = text
+                                        .get(candidate.word_start..candidate.word_end)
+                                        .unwrap_or("?");
+                                    let stem = text
+                                        .get(candidate.stem_start..candidate.stem_end)
+                                        .unwrap_or("?");
+
+                                    ui.monospace(word);
+                                    ui.monospace(stem);
+                                    ui.monospace(candidate.lexeme.as_ref());
+                                    ui.weak(candidate.rule.label());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+
+        self.lexeme_window = open;
+    }
+
     fn show_perf_status(&self, ui: &mut egui::Ui) {
         let insert = self.buffer.insert_timing();
         let label = if insert.count() == 0 {
@@ -618,15 +713,18 @@ impl eframe::App for LexwrightApp {
             ui.separator();
             self.show_morphology_status(ui);
             ui.separator();
+            self.show_lexeme_status(ui);
+            ui.separator();
             self.show_perf_status(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(&self.path_label);
+                ui.weak("ledger").on_hover_text(&self.path_label);
             });
         });
         ui.separator();
 
         self.show_rule_editor(ui.ctx());
+        self.show_lexeme_window(ui.ctx());
 
         let lexical_spans = if self.structure_overlay {
             self.analysis_latest

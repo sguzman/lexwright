@@ -122,6 +122,35 @@ pub struct MorphCounts {
     pub suffixes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LexemeRule {
+    SurfaceStem,
+    IToY,
+    UndoubleFinalConsonant,
+    RestoreFinalE,
+}
+
+impl LexemeRule {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SurfaceStem => "surface stem",
+            Self::IToY => "i→y",
+            Self::UndoubleFinalConsonant => "undouble final consonant",
+            Self::RestoreFinalE => "restore final e",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LexemeCandidate {
+    pub word_start: usize,
+    pub word_end: usize,
+    pub stem_start: usize,
+    pub stem_end: usize,
+    pub lexeme: Box<str>,
+    pub rule: LexemeRule,
+}
+
 #[derive(Clone, Debug)]
 pub struct TextAnalysis {
     pub revision: u64,
@@ -135,6 +164,7 @@ pub struct TextAnalysis {
     pub lexical_spans: Arc<[LexicalSpan]>,
     pub morph_counts: MorphCounts,
     pub morph_spans: Arc<[MorphSpan]>,
+    pub lexeme_candidates: Arc<[LexemeCandidate]>,
 }
 
 pub struct AnalysisWorker {
@@ -213,7 +243,14 @@ fn analyze(revision: u64, text: &str) -> TextAnalysis {
         paragraphs += 1;
     }
 
-    let (words, lexical_counts, lexical_spans, morph_counts, morph_spans) = analyze_words(text);
+    let (
+        words,
+        lexical_counts,
+        lexical_spans,
+        morph_counts,
+        morph_spans,
+        lexeme_candidates,
+    ) = analyze_words(text);
 
     TextAnalysis {
         revision,
@@ -227,6 +264,7 @@ fn analyze(revision: u64, text: &str) -> TextAnalysis {
         lexical_spans: lexical_spans.into(),
         morph_counts,
         morph_spans: morph_spans.into(),
+        lexeme_candidates: lexeme_candidates.into(),
     }
 }
 
@@ -238,12 +276,14 @@ fn analyze_words(
     Vec<LexicalSpan>,
     MorphCounts,
     Vec<MorphSpan>,
+    Vec<LexemeCandidate>,
 ) {
     let mut words = 0;
     let mut counts = LexicalCounts::default();
     let mut spans = Vec::new();
     let mut morph_counts = MorphCounts::default();
     let mut morph_spans = Vec::new();
+    let mut lexeme_candidates = Vec::new();
     let mut iter = text.char_indices().peekable();
 
     while let Some((start, first)) = iter.next() {
@@ -286,10 +326,23 @@ fn analyze_words(
             spans.push(LexicalSpan { start, end, class });
         }
 
-        analyze_morphology(token, start, &mut morph_counts, &mut morph_spans);
+        analyze_morphology(
+            token,
+            start,
+            &mut morph_counts,
+            &mut morph_spans,
+            &mut lexeme_candidates,
+        );
     }
 
-    (words, counts, spans, morph_counts, morph_spans)
+    (
+        words,
+        counts,
+        spans,
+        morph_counts,
+        morph_spans,
+        lexeme_candidates,
+    )
 }
 
 fn analyze_morphology(
@@ -297,8 +350,23 @@ fn analyze_morphology(
     absolute_start: usize,
     counts: &mut MorphCounts,
     spans: &mut Vec<MorphSpan>,
+    lexemes: &mut Vec<LexemeCandidate>,
 ) {
     if !word.is_ascii() || word.len() < 5 {
+        return;
+    }
+
+    const EXCEPTIONS: &[&str] = &[
+        "anything",
+        "ceiling",
+        "during",
+        "everything",
+        "morning",
+        "nothing",
+        "something",
+    ];
+
+    if any_eq(word, EXCEPTIONS) {
         return;
     }
 
@@ -363,6 +431,21 @@ fn analyze_morphology(
 
     counts.decomposed_words = counts.decomposed_words.saturating_add(1);
 
+    let nearest_suffix = suffix_ranges
+        .last()
+        .map(|(start, end)| &word[*start..*end]);
+    let surface_stem = &word[prefix_cursor..suffix_cursor];
+    let (lexeme, rule) = normalize_lexeme(surface_stem, nearest_suffix);
+
+    lexemes.push(LexemeCandidate {
+        word_start: absolute_start,
+        word_end: absolute_start + word.len(),
+        stem_start: absolute_start + prefix_cursor,
+        stem_end: absolute_start + suffix_cursor,
+        lexeme: lexeme.into_boxed_str(),
+        rule,
+    });
+
     for (start, end) in prefix_ranges {
         spans.push(MorphSpan {
             start: absolute_start + start,
@@ -387,6 +470,41 @@ fn analyze_morphology(
         });
         counts.suffixes = counts.suffixes.saturating_add(1);
     }
+}
+
+fn normalize_lexeme(stem: &str, nearest_suffix: Option<&str>) -> (String, LexemeRule) {
+    let Some(suffix) = nearest_suffix else {
+        return (stem.to_owned(), LexemeRule::SurfaceStem);
+    };
+
+    if matches!(suffix, "ness" | "ly") && stem.len() >= 2 && stem.ends_with('i') {
+        let mut lexeme = stem[..stem.len() - 1].to_owned();
+        lexeme.push('y');
+        return (lexeme, LexemeRule::IToY);
+    }
+
+    if matches!(suffix, "ing" | "ed" | "er" | "est") {
+        let mut chars = stem.chars().rev();
+        if let (Some(last), Some(previous)) = (chars.next(), chars.next())
+            && last == previous
+            && matches!(
+                last.to_ascii_lowercase(),
+                'b' | 'd' | 'g' | 'm' | 'n' | 'p' | 'r' | 't'
+            )
+        {
+            let mut lexeme = stem.to_owned();
+            lexeme.pop();
+            return (lexeme, LexemeRule::UndoubleFinalConsonant);
+        }
+    }
+
+    if suffix.eq_ignore_ascii_case("able") && stem.to_ascii_lowercase().ends_with("iev") {
+        let mut lexeme = stem.to_owned();
+        lexeme.push('e');
+        return (lexeme, LexemeRule::RestoreFinalE);
+    }
+
+    (stem.to_owned(), LexemeRule::SurfaceStem)
 }
 
 fn starts_with_ascii_case(word: &str, prefix: &str) -> bool {
@@ -757,7 +875,10 @@ fn any_suffix(word: &str, suffixes: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LexicalClass, MorphClass, analyze, analyze_morphology, classify_word};
+    use super::{
+        LexemeRule, LexicalClass, MorphClass, analyze, analyze_morphology, classify_word,
+        normalize_lexeme,
+    };
 
     #[test]
     fn counts_basic_text_without_claiming_full_nlp() {
@@ -800,11 +921,20 @@ mod tests {
     fn decomposes_multiple_affix_layers_without_claiming_lemmatization() {
         let mut counts = super::MorphCounts::default();
         let mut spans = Vec::new();
-        analyze_morphology("unhelpfulness", 0, &mut counts, &mut spans);
+        let mut lexemes = Vec::new();
+        analyze_morphology(
+            "unhelpfulness",
+            0,
+            &mut counts,
+            &mut spans,
+            &mut lexemes,
+        );
 
         assert_eq!(counts.decomposed_words, 1);
         assert_eq!(counts.prefixes, 1);
         assert_eq!(counts.suffixes, 2);
+        assert_eq!(lexemes.len(), 1);
+        assert_eq!(lexemes[0].lexeme.as_ref(), "help");
 
         let pieces: Vec<_> = spans
             .iter()
@@ -820,6 +950,33 @@ mod tests {
                 ("ness", MorphClass::Suffix),
             ]
         );
+    }
+
+    #[test]
+    fn normalizes_conservative_lexeme_spelling_alternations() {
+        assert_eq!(
+            normalize_lexeme("happi", Some("ness")),
+            ("happy".to_owned(), LexemeRule::IToY)
+        );
+        assert_eq!(
+            normalize_lexeme("runn", Some("ing")),
+            ("run".to_owned(), LexemeRule::UndoubleFinalConsonant)
+        );
+        assert_eq!(
+            normalize_lexeme("believ", Some("able")),
+            ("believe".to_owned(), LexemeRule::RestoreFinalE)
+        );
+        assert_eq!(
+            normalize_lexeme("quick", Some("ly")),
+            ("quick".to_owned(), LexemeRule::SurfaceStem)
+        );
+    }
+
+    #[test]
+    fn morphology_skips_obvious_false_suffix_words() {
+        let result = analyze(3, "something nothing everything anything");
+        assert!(result.morph_spans.is_empty());
+        assert!(result.lexeme_candidates.is_empty());
     }
 
     #[test]
