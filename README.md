@@ -101,13 +101,16 @@ The important part is architectural rather than the simple counts:
 
 ```text
 typing
-  -> 160 ms idle boundary
-  -> one Arc<str> snapshot
+  -> 45 ms idle (when Harper is enabled)
+       |-> one cached Arc<str> snapshot
+       |-> incremental Harper worker
+  -> 160 ms idle
+       |-> reuse the same snapshot if the revision is unchanged
        |-> save worker
-       |-> analysis worker
+       |-> structure/morphology worker
 ```
 
-The UI thread copies the ledger once. Persistence and analysis share that immutable snapshot rather than each requesting their own document copy.
+The UI thread caches at most one immutable snapshot for the current revision. If Harper requests it first at 45 ms, the later 160 ms persistence/analysis pass reuses that same allocation rather than cloning the ledger again. Any new edit invalidates the cache.
 
 Analysis results carry the revision they observed. If the user edits again while analysis is running, the UI can identify the result as stale instead of blocking for a fresh answer. The worker also collapses queued stale jobs to the newest waiting snapshot before beginning its next pass.
 
@@ -172,9 +175,9 @@ Arc<str>
 
 The Harper dictionary and curated American-English linter are initialized lazily on the worker after the first request. They never run on the process-start -> first-frame path.
 
-Harper diagnostics are also underlined directly in the editor whenever the result matches the live revision, so spelling/grammar mistakes remain visible without opening the diagnostics window. Spelling uses a red underline; capitalization and other grammar classes use distinct warm underlines. The diagnostics window preserves each issue's exact source span, Harper category, message, priority, and structured replacement/insertion/removal suggestions. Suggestions can now be applied explicitly. Each apply operation is revision-checked against the snapshot that produced the diagnostic, validates UTF-8 byte boundaries, seeds egui's undo history with the exact pre-fix text/cursor state, moves the cursor deterministically after the replacement, and becomes a normal new Lexwright revision. **Ctrl+Z restores the pre-fix text.**
+Harper diagnostics are also underlined directly in the editor whenever the result matches the live revision, so spelling/grammar mistakes remain visible without opening the diagnostics window. Spelling uses a red underline; capitalization and other grammar classes use distinct warm underlines. Harper underlines are painted **after** egui has finished laying out the text; they never participate in shaping or wrapping. The diagnostics window preserves each issue's exact source span, Harper category, message, priority, and structured replacement/insertion/removal suggestions. Suggestions can now be applied explicitly. Each apply operation is revision-checked against the snapshot that produced the diagnostic, validates UTF-8 byte boundaries, seeds egui's undo history with the exact pre-fix text/cursor state, moves the cursor deterministically after the replacement, and becomes a normal new Lexwright revision. **Ctrl+Z restores the pre-fix text.**
 
-Harper results are revision-tagged and queued stale snapshots are collapsed before the next grammar pass. If the ledger changes before a suggestion is applied, that suggestion expires rather than editing the wrong bytes. A slow Harper pass therefore cannot block typing or delay the lightweight structure/morphology analyzer.
+Harper results are revision-tagged and queued stale snapshots are collapsed before the next grammar pass. After the initial full pass, Harper diffs the newest snapshot against its last completed snapshot, expands the changed range to local sentence context (capped for pathological long sentences), preserves diagnostics outside that window, shifts unaffected later spans by the edit delta, and lints only the dirty window. The Harper tooltip reports `work: linted / total bytes incremental` so this behavior is directly inspectable. If the ledger changes before a suggestion is applied, that suggestion expires rather than editing the wrong bytes.
 
 ## Repeatable latency probe
 
@@ -269,7 +272,7 @@ Near-term work is intentionally ordered by dependency, not spectacle:
 - collect real latency measurements on normal and large ledgers
 - decide the custom editor-buffer boundary from those measurements
 - add in-app rule editing and named expansion rulesets
-- add spelling/grammar diagnostics (Harper-class behavior) asynchronously
+- deepen Harper incremental edit provenance beyond snapshot diffing
 - deepen token/POS accuracy beyond the current heuristic overlay
 - deepen lexeme/morpheme inspection beyond conservative normalization rules
 - add named experimental English modes and transformation pipelines

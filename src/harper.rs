@@ -119,22 +119,12 @@ fn harper_worker(job_rx: Receiver<HarperJob>, result_tx: Sender<HarperResult>) {
             Some(state) if state.text.as_ref() == job.text.as_ref() => {
                 (Arc::clone(&state.diagnostics), 0, true)
             }
-            Some(state) => lint_incremental(
-                state,
-                &job.text,
-                &parser,
-                dictionary.as_ref(),
-                &mut linter,
-            ),
+            Some(state) => {
+                lint_incremental(state, &job.text, &parser, dictionary.as_ref(), &mut linter)
+            }
             None => {
-                let diagnostics = lint_window(
-                    &job.text,
-                    0,
-                    0,
-                    &parser,
-                    dictionary.as_ref(),
-                    &mut linter,
-                );
+                let diagnostics =
+                    lint_window(&job.text, 0, 0, &parser, dictionary.as_ref(), &mut linter);
                 let (diagnostics, _) = cap_diagnostics(diagnostics);
                 (diagnostics, job.text.len(), false)
             }
@@ -191,21 +181,13 @@ fn lint_incremental(
     // The left boundary lives in the unchanged prefix. The right boundary lives in
     // the unchanged suffix (or EOF), so it can be mapped into the new document by
     // applying the total byte delta.
-    let (window_start, old_window_end) =
-        dirty_window(old_text, diff.start, diff.old_end);
+    let (window_start, old_window_end) = dirty_window(old_text, diff.start, diff.old_end);
     let new_window_end = shift_index(old_window_end, byte_delta)
         .unwrap_or(new_text.len())
         .min(new_text.len());
 
     if window_start > new_window_end || !new_text.is_char_boundary(new_window_end) {
-        let diagnostics = lint_window(
-            new_text,
-            0,
-            0,
-            parser,
-            dictionary,
-            linter,
-        );
+        let diagnostics = lint_window(new_text, 0, 0, parser, dictionary, linter);
         let (diagnostics, _) = cap_diagnostics(diagnostics);
         return (diagnostics, new_text.len(), false);
     }
@@ -326,8 +308,7 @@ fn diff_ranges(old: &str, new: &str) -> Option<DiffRange> {
     let max_suffix = old_remaining.min(new_remaining);
 
     while suffix < max_suffix
-        && old.as_bytes()[old.len() - 1 - suffix]
-            == new.as_bytes()[new.len() - 1 - suffix]
+        && old.as_bytes()[old.len() - 1 - suffix] == new.as_bytes()[new.len() - 1 - suffix]
     {
         suffix += 1;
     }
@@ -371,10 +352,7 @@ fn dirty_window(text: &str, changed_start: usize, changed_end: usize) -> (usize,
 
     let fallback_start = word_boundary_left(
         text,
-        floor_char_boundary(
-            text,
-            changed_start.saturating_sub(FALLBACK_CONTEXT_BYTES),
-        ),
+        floor_char_boundary(text, changed_start.saturating_sub(FALLBACK_CONTEXT_BYTES)),
     );
     let fallback_end = word_boundary_right(
         text,
@@ -386,7 +364,10 @@ fn dirty_window(text: &str, changed_start: usize, changed_end: usize) -> (usize,
         ),
     );
 
-    (fallback_start, fallback_end.max(changed_end).min(text.len()))
+    (
+        fallback_start,
+        fallback_end.max(changed_end).min(text.len()),
+    )
 }
 
 fn sentence_start(text: &str, pos: usize) -> usize {

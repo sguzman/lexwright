@@ -51,7 +51,7 @@ Current policy:
 
 The UI thread never performs the disk write.
 
-The current snapshot operation still copies the document once on the UI thread after the idle delay. Its duration is measured explicitly. The snapshot is an immutable `Arc<str>` shared by persistence and analysis, so adding observers does not multiply full-document copies. A future buffer/storage design must remove even this document-sized snapshot copy from routine persistence once measurements show it matters.
+The current snapshot operation still copies the document on the UI thread, so its duration is measured explicitly. Snapshots are cached by document revision. With Harper enabled, a snapshot may be created after Harper's shorter idle delay; if no further edit occurs, persistence and the lightweight analyzer later reuse that exact `Arc<str>` instead of cloning the ledger again. A future buffer/storage design must remove even this document-sized snapshot copy once measurements show it matters.
 
 ## 3. Programmable input
 
@@ -97,15 +97,15 @@ Instrumentation itself must remain cheap. The timing structure is fixed-size and
 
 The analysis lane is now live.
 
-After the same 160 ms idle boundary used for persistence, Lexwright creates one immutable `Arc<str>` snapshot. Persistence and each enabled analyzer receive shared references to that same allocation. The lightweight structure/morphology analyzer runs continuously; heavier analyzers may be opt-in.
+The lightweight structure/morphology analyzer follows the 160 ms persistence idle boundary. Harper has its own shorter 45 ms idle boundary so spelling feedback does not inherit disk-save latency. Both obtain the same revision-cached immutable `Arc<str>` when possible; a new edit invalidates that cache immediately.
 
 If an analyzer falls behind, its queued jobs are collapsed independently to the newest waiting revision before the next pass. Stale work is observationally useless and must never become backpressure on typing.
 
-Harper is deliberately isolated on its own worker and disabled by default. Its dictionary and curated linter are constructed lazily only after the user enables Harper or explicitly requests a pass. Dictionary-backed grammar work therefore cannot extend startup latency, block typing, or delay word counts, structure spans, or morphology.
+Harper is deliberately isolated on its own worker and disabled by default. Its dictionary and curated linter are constructed lazily only after the user enables Harper or explicitly requests a pass. The first request performs a full lint. Subsequent requests compute the changed byte range against the last completed snapshot, expand it into bounded sentence context, retain diagnostics in untouched regions, shift later untouched spans by the byte/character delta, and lint only that local window. Dictionary-backed grammar work therefore cannot extend startup latency, block typing, or force a full-document grammar pass after every keystroke.
 
 The analyzer now reports mechanical counts plus revision-tagged lexical spans. Closed-class English words can be classified directly from small explicit lexicons. Open-class guesses are intentionally named `*-like` because the first pass uses conservative lexical/suffix heuristics rather than pretending to be a statistical POS tagger.
 
-A single editor layouter is installed permanently and composes already-computed structure colors, morphology colors, and Harper underlines only when their analysis revision exactly matches the live document revision. Classification never happens in the layouter. The same callback handles plain text and decorated text, and always wraps to the TextEdit viewport width. Analyzer state therefore changes paint only; it cannot switch layout implementations, disable wrapping, or move line breaks merely because a background result became current.
+A single editor layouter is installed permanently for plain text plus structure/morphology coloring and always wraps to the TextEdit viewport width. Harper is intentionally excluded from the `LayoutJob`: after `TextEdit::show` returns the final galley, Harper underlines are painted as clipped line segments using the already-computed row/glyph positions. A Harper result therefore has no authority over text shaping, line width, or wrapping geometry.
 
 Future systems plug into the same worker boundary:
 

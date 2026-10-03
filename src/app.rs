@@ -830,7 +830,11 @@ impl LexwrightApp {
                 format_ns(result.elapsed.as_nanos().min(u64::MAX as u128) as u64),
                 result.linted_bytes,
                 result.total_bytes,
-                if result.incremental { " incremental" } else { " full" },
+                if result.incremental {
+                    " incremental"
+                } else {
+                    " full"
+                },
             )
         } else {
             "Harper is waiting for the current revision. Click to open diagnostics/settings."
@@ -1282,10 +1286,7 @@ fn paint_harper_underlines(
             continue;
         }
 
-        let stroke = egui::Stroke::new(
-            1.0,
-            harper_underline_color(diagnostic.kind.as_ref()),
-        );
+        let stroke = egui::Stroke::new(1.0, harper_underline_color(diagnostic.kind.as_ref()));
         let mut row_start = 0usize;
 
         for row in &galley.rows {
@@ -1298,15 +1299,13 @@ fn paint_harper_underlines(
             if start < end {
                 let local_start = start - row_start;
                 let local_end = end - row_start;
-                let x1 = galley_pos.x + row.pos.x + row.x_offset(egui::text::CharIndex(local_start));
+                let x1 =
+                    galley_pos.x + row.pos.x + row.x_offset(egui::text::CharIndex(local_start));
                 let x2 = galley_pos.x + row.pos.x + row.x_offset(egui::text::CharIndex(local_end));
                 let y = galley_pos.y + row.pos.y + row.max_y() - 1.0;
 
                 if x2 > x1 {
-                    painter.line_segment(
-                        [egui::pos2(x1, y), egui::pos2(x2, y)],
-                        stroke,
-                    );
+                    painter.line_segment([egui::pos2(x1, y), egui::pos2(x2, y)], stroke);
                 }
             }
 
