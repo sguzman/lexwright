@@ -74,9 +74,7 @@ impl VimLite {
         }
 
         if self.mode == VimMode::Insert {
-            if ui
-                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-            {
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 self.mode = VimMode::Nav;
                 self.pending_g = false;
                 self.vertical_x = None;

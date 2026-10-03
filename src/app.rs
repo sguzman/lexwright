@@ -1652,9 +1652,9 @@ impl eframe::App for LexwrightApp {
 
         let editor_id = egui::Id::new("lexwright-ledger-editor");
         self.apply_pending_external_edit(ui.ctx(), editor_id);
-        let nav_command =
-            self.vim_lite
-                .capture(ui, editor_id, self.editor_settings.vim_lite);
+        let nav_command = self
+            .vim_lite
+            .capture(ui, editor_id, self.editor_settings.vim_lite);
 
         let lexical_spans = if self.structure_overlay {
             self.analysis_latest
