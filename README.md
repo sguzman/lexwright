@@ -45,6 +45,8 @@ The instrument now has:
 - an O(1) character-to-byte index fast path for ordinary ASCII English
 - a revision-tagged background analysis worker
 - live word/character/line/paragraph statistics
+- an optional lexical-structure color overlay
+- grammatical-category counts with explicit heuristic labeling
 - one immutable snapshot shared by autosave and analysis
 - no linguistic analyzer on the input path
 
@@ -106,6 +108,25 @@ The UI thread copies the ledger once. Persistence and analysis share that immuta
 Analysis results carry the revision they observed. If the user edits again while analysis is running, the UI can identify the result as stale instead of blocking for a fresh answer. The worker also collapses queued stale jobs to the newest waiting snapshot before beginning its next pass.
 
 The current analyzer intentionally makes only mechanical text counts. POS tagging, morphology, and Harper-class diagnostics will plug into this same worker boundary later; none of them get permission to enter the keystroke path.
+
+
+## Structure overlay
+
+Click **structure off** in the top bar to enable Lexwright's first language-structure view.
+
+The background analyzer now records byte spans and category counts. When the analyzed revision exactly matches the text on screen, Lexwright can color the corresponding words inside the editable text itself.
+
+The initial classifier deliberately distinguishes between two confidence levels:
+
+- closed lexical classes such as **pronoun**, **determiner**, **preposition**, **conjunction**, and **auxiliary** use explicit English word sets
+- open lexical classes are labeled **verb-like**, **adjective-like**, **adverb-like**, and **noun-like** because they currently use conservative word-list and suffix heuristics
+
+Unclassified words remain the normal text color. Hover **structure on/off** for the current category counts and the methodological warning.
+
+This is scaffolding for the real system, not a claim that suffixes solve part-of-speech tagging. The useful achievement is that revision-tagged linguistic spans can now flow from the background analyzer into the live editor without the classifier entering the typing path.
+
+The overlay is **off by default**. egui invokes a custom TextEdit layouter at least once per frame, so Lexwright does not pay that rendering cost unless the user explicitly asks to see structure.
+
 
 
 

@@ -101,7 +101,11 @@ After the same 160 ms idle boundary used for persistence, Lexwright creates one 
 
 If analysis falls behind, queued jobs are collapsed to the newest waiting revision before the next pass. Stale work is observationally useless and must never become backpressure on typing.
 
-The first analyzer reports mechanical counts only: words, characters, bytes, lines, and paragraphs. Future systems plug into the same worker boundary:
+The analyzer now reports mechanical counts plus revision-tagged lexical spans. Closed-class English words can be classified directly from small explicit lexicons. Open-class guesses are intentionally named `*-like` because the first pass uses conservative lexical/suffix heuristics rather than pretending to be a statistical POS tagger.
+
+An optional editor layouter consumes those already-computed spans and colors them only when the analysis revision exactly matches the live document revision. Classification never happens in the layouter. The overlay is off by default because egui calls custom TextEdit layouters at least once per frame, and visualization work is not allowed to tax the default writing path.
+
+Future systems plug into the same worker boundary:
 
 ```text
 revision N
