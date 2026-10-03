@@ -531,6 +531,7 @@ impl LexwrightApp {
         let mut open = self.rule_editor.open;
         let mut save_activate = false;
         let mut discard_draft = false;
+        let mut reset_stats = false;
         let mut create_set = false;
         let mut delete_set = false;
 
@@ -706,9 +707,20 @@ impl LexwrightApp {
 
                 ui.add_space(8.0);
                 ui.separator();
-                ui.strong("Session comparison");
+                ui.horizontal(|ui| {
+                    ui.strong("Session comparison");
+                    if ui
+                        .small_button("Reset active stats")
+                        .on_hover_text(
+                            "Clear only the active ruleset's runtime measurements. Rules and saved configuration are unchanged.",
+                        )
+                        .clicked()
+                    {
+                        reset_stats = true;
+                    }
+                });
                 ui.weak(
-                    "Runtime-only measurements for this Lexwright session. Zero-hit sets remain visible for comparison.",
+                    "Runtime-only measurements for this Lexwright session. Saving a changed ruleset resets that set's stats so old and new definitions are not mixed.",
                 );
                 egui::Grid::new("lexwright_expansion_ruleset_stats")
                     .num_columns(5)
@@ -796,6 +808,14 @@ impl LexwrightApp {
             return;
         }
 
+        if reset_stats {
+            self.buffer.reset_active_expansion_stats();
+            self.rule_editor.status = Some(format!(
+                "reset session stats for {:?}",
+                self.buffer.expansion_active_set_name()
+            ));
+        }
+
         if discard_draft {
             self.rule_editor.load_from(&self.buffer);
             self.rule_editor.status =
@@ -811,7 +831,7 @@ impl LexwrightApp {
                     self.rule_editor.active_set =
                         self.buffer.expansion_active_set_name().to_owned();
                     self.rule_editor.status = Some(format!(
-                        "saved {:?} and compiled {} active rules",
+                        "saved {:?}, compiled {} active rules, and reset its session stats",
                         self.buffer.expansion_active_set_name(),
                         self.buffer.expansion_rule_count()
                     ));
