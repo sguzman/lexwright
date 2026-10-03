@@ -641,12 +641,18 @@ impl LexwrightApp {
                     .max_height(340.0)
                     .show(ui, |ui| {
                         egui::Grid::new("lexwright_expansion_rule_grid")
-                            .num_columns(3)
+                            .num_columns(5)
                             .striped(true)
                             .spacing([8.0, 4.0])
                             .show(ui, |ui| {
                                 ui.strong("trigger");
                                 ui.strong("replacement");
+                                ui.strong("hits").on_hover_text(
+                                    "Successful expansions for this saved trigger in the current session.",
+                                );
+                                ui.strong("avoided").on_hover_text(
+                                    "Replacement characters minus trigger characters across successful hits.",
+                                );
                                 ui.strong("");
                                 ui.end_row();
 
@@ -659,8 +665,14 @@ impl LexwrightApp {
                                     );
                                     ui.add(
                                         egui::TextEdit::singleline(&mut rule.replacement)
-                                            .desired_width(360.0),
+                                            .desired_width(300.0),
                                     );
+
+                                    let rule_stats =
+                                        self.buffer.active_expansion_rule_stats(&rule.trigger);
+                                    ui.monospace(rule_stats.hits.to_string());
+                                    ui.monospace(rule_stats.avoided_chars().to_string());
+
                                     if ui.small_button("remove").clicked() {
                                         remove_index = Some(index);
                                     }
