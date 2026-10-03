@@ -7,6 +7,7 @@ description = "A latency-first English IDE"
 
 [dependencies]
 eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+harper-core = { version = "=2.11.0", default-features = false }
 
 [profile.dev]
 opt-level = 1

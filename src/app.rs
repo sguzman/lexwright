@@ -9,6 +9,7 @@ use crate::{
     analysis::{AnalysisWorker, LexicalClass, LexicalSpan, MorphClass, MorphSpan, TextAnalysis},
     editor_buffer::EditorBuffer,
     expansion::ExpansionRule,
+    harper::{HarperResult, HarperWorker},
     metrics::TimingMetric,
     storage::{LedgerStore, SaveEvent},
 };
@@ -76,6 +77,11 @@ pub struct LexwrightApp {
     structure_overlay: bool,
     morphology_overlay: bool,
     lexeme_window: bool,
+    harper_worker: HarperWorker,
+    harper_latest: Option<HarperResult>,
+    harper_pending_revision: Option<u64>,
+    harper_error: Option<String>,
+    harper_window: bool,
 }
 
 impl LexwrightApp {
@@ -93,9 +99,17 @@ impl LexwrightApp {
         };
 
         let analysis_worker = AnalysisWorker::new();
+        let harper_worker = HarperWorker::new();
         let initial_snapshot = Arc::<str>::from(text.as_str());
+
         let (analysis_pending_revision, analysis_error) =
-            match analysis_worker.queue(0, initial_snapshot) {
+            match analysis_worker.queue(0, Arc::clone(&initial_snapshot)) {
+                Ok(()) => (Some(0), None),
+                Err(error) => (None, Some(error)),
+            };
+
+        let (harper_pending_revision, harper_error) =
+            match harper_worker.queue(0, initial_snapshot) {
                 Ok(()) => (Some(0), None),
                 Err(error) => (None, Some(error)),
             };
@@ -119,6 +133,11 @@ impl LexwrightApp {
             structure_overlay: false,
             morphology_overlay: false,
             lexeme_window: false,
+            harper_worker,
+            harper_latest: None,
+            harper_pending_revision,
+            harper_error,
+            harper_window: false,
         }
     }
 
@@ -166,20 +185,34 @@ impl LexwrightApp {
         match self.store.queue_save(revision, Arc::clone(&snapshot)) {
             Ok(()) => {
                 self.queued_revision = revision;
-
-                match self.analysis_worker.queue(revision, snapshot) {
-                    Ok(()) => {
-                        self.analysis_pending_revision = Some(revision);
-                        self.analysis_error = None;
-                    }
-                    Err(error) => {
-                        self.analysis_pending_revision = None;
-                        self.analysis_error = Some(error);
-                    }
-                }
             }
             Err(error) => {
                 self.save_error = Some(error);
+            }
+        }
+
+        match self
+            .analysis_worker
+            .queue(revision, Arc::clone(&snapshot))
+        {
+            Ok(()) => {
+                self.analysis_pending_revision = Some(revision);
+                self.analysis_error = None;
+            }
+            Err(error) => {
+                self.analysis_pending_revision = None;
+                self.analysis_error = Some(error);
+            }
+        }
+
+        match self.harper_worker.queue(revision, snapshot) {
+            Ok(()) => {
+                self.harper_pending_revision = Some(revision);
+                self.harper_error = None;
+            }
+            Err(error) => {
+                self.harper_pending_revision = None;
+                self.harper_error = Some(error);
             }
         }
     }
@@ -199,6 +232,26 @@ impl LexwrightApp {
                     self.analysis_pending_revision = None;
                 }
                 self.analysis_latest = Some(result);
+            }
+        }
+    }
+
+
+    fn poll_harper(&mut self) {
+        while let Some(result) = self.harper_worker.poll() {
+            let should_store = self
+                .harper_latest
+                .as_ref()
+                .is_none_or(|previous| result.revision >= previous.revision);
+
+            if should_store {
+                if self
+                    .harper_pending_revision
+                    .is_some_and(|pending| result.revision >= pending)
+                {
+                    self.harper_pending_revision = None;
+                }
+                self.harper_latest = Some(result);
             }
         }
     }
@@ -623,6 +676,117 @@ impl LexwrightApp {
         self.lexeme_window = open;
     }
 
+
+    fn show_harper_status(&mut self, ui: &mut egui::Ui) {
+        if let Some(error) = &self.harper_error {
+            if ui
+                .small_button("harper error")
+                .on_hover_text(error)
+                .clicked()
+            {
+                self.harper_window = !self.harper_window;
+            }
+            return;
+        }
+
+        let current = self
+            .harper_latest
+            .as_ref()
+            .filter(|result| result.revision == self.revision);
+
+        let label = if let Some(result) = current {
+            format!("harper {}", result.diagnostics.len())
+        } else {
+            "harper …".to_owned()
+        };
+
+        let tooltip = if let Some(result) = current {
+            format!(
+                "Harper 2.11.0 · American English\nrevision: {}\ndiagnostics: {}{}\nHarper CPU: {}\n\nRuns on a separate background worker. Click to inspect suggestions.",
+                result.revision,
+                result.diagnostics.len(),
+                if result.truncated { " (truncated)" } else { "" },
+                format_ns(result.elapsed.as_nanos().min(u64::MAX as u128) as u64),
+            )
+        } else {
+            "Harper is analyzing a background snapshot. Click to open diagnostics.".to_owned()
+        };
+
+        if ui.small_button(label).on_hover_text(tooltip).clicked() {
+            self.harper_window = !self.harper_window;
+        }
+    }
+
+    fn show_harper_window(&mut self, ctx: &egui::Context) {
+        if !self.harper_window {
+            return;
+        }
+
+        let mut open = self.harper_window;
+
+        egui::Window::new("Harper diagnostics")
+            .open(&mut open)
+            .default_width(680.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.weak(
+                    "Harper suggestions are observational for now. Nothing in this window rewrites the ledger.",
+                );
+                ui.add_space(6.0);
+
+                let Some(result) = self
+                    .harper_latest
+                    .as_ref()
+                    .filter(|result| result.revision == self.revision)
+                else {
+                    ui.weak("Waiting for Harper to finish the current revision.");
+                    return;
+                };
+
+                if result.diagnostics.is_empty() {
+                    ui.label("No Harper diagnostics for this revision.");
+                    return;
+                }
+
+                if result.truncated {
+                    ui.weak("Showing the first 256 diagnostics.");
+                    ui.separator();
+                }
+
+                egui::ScrollArea::vertical()
+                    .max_height(480.0)
+                    .show(ui, |ui| {
+                        for diagnostic in result.diagnostics.iter() {
+                            let source = self
+                                .buffer
+                                .text()
+                                .get(diagnostic.start_byte..diagnostic.end_byte)
+                                .unwrap_or("?");
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong(diagnostic.kind.as_ref());
+                                ui.monospace(source);
+                                ui.weak(format!("priority {}", diagnostic.priority));
+                            });
+                            ui.label(diagnostic.message.as_ref());
+
+                            if !diagnostic.suggestions.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.weak("suggestions:");
+                                    for suggestion in diagnostic.suggestions.iter() {
+                                        ui.monospace(suggestion.label());
+                                    }
+                                });
+                            }
+
+                            ui.separator();
+                        }
+                    });
+            });
+
+        self.harper_window = open;
+    }
+
     fn show_perf_status(&self, ui: &mut egui::Ui) {
         let insert = self.buffer.insert_timing();
         let label = if insert.count() == 0 {
@@ -693,9 +857,13 @@ impl eframe::App for LexwrightApp {
 
         self.poll_save_events();
         self.poll_analysis();
+        self.poll_harper();
         self.maybe_autosave();
 
-        if self.queued_revision > self.saved_revision || self.analysis_pending_revision.is_some() {
+        if self.queued_revision > self.saved_revision
+            || self.analysis_pending_revision.is_some()
+            || self.harper_pending_revision.is_some()
+        {
             ui.ctx().request_repaint_after(SAVE_STATUS_POLL);
         }
 
@@ -715,6 +883,8 @@ impl eframe::App for LexwrightApp {
             ui.separator();
             self.show_lexeme_status(ui);
             ui.separator();
+            self.show_harper_status(ui);
+            ui.separator();
             self.show_perf_status(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -725,6 +895,7 @@ impl eframe::App for LexwrightApp {
 
         self.show_rule_editor(ui.ctx());
         self.show_lexeme_window(ui.ctx());
+        self.show_harper_window(ui.ctx());
 
         let lexical_spans = if self.structure_overlay {
             self.analysis_latest

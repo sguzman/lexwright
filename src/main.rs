@@ -2,6 +2,7 @@ mod analysis;
 mod app;
 mod editor_buffer;
 mod expansion;
+mod harper;
 mod metrics;
 mod probe;
 mod storage;
