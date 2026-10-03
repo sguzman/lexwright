@@ -14,6 +14,7 @@ use crate::{
     harper::{HarperDiagnostic, HarperResult, HarperSuggestion, HarperWorker},
     jitter::{JitterFrame, JitterRecorder},
     metrics::TimingMetric,
+    settings::{self, EditorSettings},
     storage::{LedgerStore, SaveEvent},
 };
 
@@ -70,6 +71,21 @@ impl RuleEditor {
     }
 }
 
+#[derive(Default)]
+struct EditorSettingsEditor {
+    open: bool,
+    draft: EditorSettings,
+    status: Option<String>,
+}
+
+impl EditorSettingsEditor {
+    fn load_from(&mut self, settings: &EditorSettings) {
+        self.open = true;
+        self.draft = settings.clone();
+        self.status = None;
+    }
+}
+
 struct PendingExternalEdit {
     expected_revision: u64,
     start_byte: usize,
@@ -110,11 +126,19 @@ pub struct LexwrightApp {
     snapshot_revision: Option<u64>,
     snapshot_cache: Option<Arc<str>>,
     jitter_recorder: JitterRecorder,
+    editor_settings: EditorSettings,
+    editor_settings_path: PathBuf,
+    editor_settings_error: Option<String>,
+    editor_settings_editor: EditorSettingsEditor,
 }
 
 impl LexwrightApp {
     pub fn new(cc: &eframe::CreationContext<'_>, process_started: Instant) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        let (editor_settings, editor_settings_path, editor_settings_error) =
+            settings::load_default();
+        let mut visuals = egui::Visuals::dark();
+        apply_cursor_visuals(&mut visuals, &editor_settings);
+        cc.egui_ctx.set_visuals(visuals);
 
         let store = LedgerStore::default();
         let path_label = store.path().display().to_string();
@@ -173,6 +197,10 @@ impl LexwrightApp {
             snapshot_revision: Some(0),
             snapshot_cache: Some(initial_snapshot),
             jitter_recorder: JitterRecorder::new(),
+            editor_settings,
+            editor_settings_path,
+            editor_settings_error,
+            editor_settings_editor: EditorSettingsEditor::default(),
         }
     }
 
@@ -1316,6 +1344,156 @@ impl LexwrightApp {
         }
     }
 
+    fn show_cursor_status(&mut self, ui: &mut egui::Ui) {
+        let tooltip = if let Some(error) = &self.editor_settings_error {
+            format!(
+                "Editor settings error: {error}\nUsing current in-memory settings.\nConfig: {}",
+                self.editor_settings_path.display()
+            )
+        } else {
+            format!(
+                "Cursor width: {:.1}px\nBlink: {}{}\nVim-lite: {}\nConfig: {}\n\nClick to configure.",
+                self.editor_settings.cursor_width,
+                if self.editor_settings.cursor_blink {
+                    "on"
+                } else {
+                    "off"
+                },
+                if self.editor_settings.cursor_blink {
+                    format!(
+                        " ({:.2}s on / {:.2}s off)",
+                        self.editor_settings.cursor_on_seconds,
+                        self.editor_settings.cursor_off_seconds
+                    )
+                } else {
+                    String::new()
+                },
+                if self.editor_settings.vim_lite {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                self.editor_settings_path.display()
+            )
+        };
+
+        if ui.small_button("cursor").on_hover_text(tooltip).clicked() {
+            self.editor_settings_editor.load_from(&self.editor_settings);
+        }
+    }
+
+    fn show_editor_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.editor_settings_editor.open {
+            return;
+        }
+
+        let mut open = self.editor_settings_editor.open;
+        let mut save = false;
+        let mut discard = false;
+
+        egui::Window::new("Editor ergonomics")
+            .open(&mut open)
+            .default_width(430.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.weak(self.editor_settings_path.display().to_string());
+                ui.add_space(6.0);
+
+                ui.strong("Cursor");
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.editor_settings_editor.draft.cursor_width,
+                        0.5..=12.0,
+                    )
+                    .text("width (px)")
+                    .fixed_decimals(1),
+                );
+
+                ui.checkbox(
+                    &mut self.editor_settings_editor.draft.cursor_blink,
+                    "Blink cursor",
+                );
+
+                if self.editor_settings_editor.draft.cursor_blink {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.editor_settings_editor.draft.cursor_on_seconds,
+                            0.05..=3.0,
+                        )
+                        .text("visible seconds")
+                        .fixed_decimals(2),
+                    );
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.editor_settings_editor.draft.cursor_off_seconds,
+                            0.05..=3.0,
+                        )
+                        .text("hidden seconds")
+                        .fixed_decimals(2),
+                    );
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.strong("Navigation");
+                ui.checkbox(
+                    &mut self.editor_settings_editor.draft.vim_lite,
+                    "Enable Vim-lite navigation",
+                )
+                .on_hover_text(
+                    "Prepares the editor for a deliberately small navigation mode. No registers, macros, operators, command line, or full Vim emulation.",
+                );
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save settings").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Discard draft").clicked() {
+                        discard = true;
+                    }
+                });
+
+                if let Some(status) = &self.editor_settings_editor.status {
+                    ui.add_space(4.0);
+                    ui.weak(status);
+                }
+
+                ui.add_space(4.0);
+                ui.weak(
+                    "Settings are applied only when saved. Cursor styling uses egui's built-in cursor visuals and does not alter text layout.",
+                );
+            });
+
+        self.editor_settings_editor.open = open;
+
+        if discard {
+            self.editor_settings_editor.load_from(&self.editor_settings);
+            self.editor_settings_editor.status =
+                Some("discarded draft; reloaded saved settings".to_owned());
+        }
+
+        if save {
+            let draft = self.editor_settings_editor.draft.clone();
+            match settings::save(&self.editor_settings_path, &draft) {
+                Ok(()) => {
+                    self.editor_settings = draft;
+                    self.editor_settings_error = None;
+                    ctx.global_style_mut(|style| {
+                        apply_cursor_style(style, &self.editor_settings);
+                    });
+                    self.editor_settings_editor.status =
+                        Some("saved editor settings".to_owned());
+                }
+                Err(error) => {
+                    self.editor_settings_error = Some(error.clone());
+                    self.editor_settings_editor.status =
+                        Some(format!("cannot save settings: {error}"));
+                }
+            }
+        }
+    }
+
     fn show_perf_status(&self, ui: &mut egui::Ui) {
         let insert = self.buffer.insert_timing();
         let label = if insert.count() == 0 {
@@ -1431,6 +1609,8 @@ impl eframe::App for LexwrightApp {
             self.show_harper_status(ui);
             ui.separator();
             self.show_perf_status(ui);
+            ui.separator();
+            self.show_cursor_status(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak("ledger").on_hover_text(&self.path_label);
@@ -1441,6 +1621,7 @@ impl eframe::App for LexwrightApp {
         self.show_rule_editor(ui.ctx());
         self.show_lexeme_window(ui.ctx());
         self.show_harper_window(ui.ctx());
+        self.show_editor_settings_window(ui.ctx());
 
         let editor_id = egui::Id::new("lexwright-ledger-editor");
         self.apply_pending_external_edit(ui.ctx(), editor_id);
@@ -1586,6 +1767,17 @@ impl eframe::App for LexwrightApp {
         self.queue_current_revision();
         let _ = self.store.flush();
     }
+}
+
+fn apply_cursor_visuals(visuals: &mut egui::Visuals, settings: &EditorSettings) {
+    visuals.text_cursor.stroke.width = settings.cursor_width;
+    visuals.text_cursor.blink = settings.cursor_blink;
+    visuals.text_cursor.on_duration = settings.cursor_on_seconds;
+    visuals.text_cursor.off_duration = settings.cursor_off_seconds;
+}
+
+fn apply_cursor_style(style: &mut egui::Style, settings: &EditorSettings) {
+    apply_cursor_visuals(&mut style.visuals, settings);
 }
 
 fn decorated_galley(
