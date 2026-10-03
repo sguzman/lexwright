@@ -156,8 +156,11 @@ impl EditorBuffer {
     fn byte_index_for_char(&mut self, char_index: egui::text::CharIndex) -> usize {
         if self.ascii_only {
             self.index_stats.ascii_fast = self.index_stats.ascii_fast.saturating_add(1);
-            debug_assert!(char_index.0 <= self.text.len());
-            char_index.0
+
+            // Match egui/String TextBuffer semantics exactly: cursor/delete machinery may
+            // transiently ask for a character index past EOF, and the stock implementation
+            // clamps that to text.len(). The ASCII fast path must do the same.
+            char_index.0.min(self.text.len())
         } else {
             self.index_stats.utf8_fallback = self.index_stats.utf8_fallback.saturating_add(1);
             <String as TextBuffer>::byte_index_from_char_index(&self.text, char_index).0
@@ -400,6 +403,17 @@ mod tests {
                 new_end_char: 1,
             }]
         );
+    }
+
+    #[test]
+    fn ascii_fast_path_clamps_one_past_end_like_stock_text_buffer() {
+        let mut buffer = EditorBuffer::new("abc".to_owned());
+
+        buffer.insert_text("X", CharIndex(4));
+        assert_eq!(buffer.text(), "abcX");
+
+        buffer.delete_char_range(CharIndex(3)..CharIndex(5));
+        assert_eq!(buffer.text(), "abc");
     }
 
     #[test]
