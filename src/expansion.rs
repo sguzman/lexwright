@@ -354,7 +354,10 @@ fn validate_set(set: &ExpansionSet) -> Result<(), String> {
         let line = index + 1;
 
         if rule.trigger.is_empty() {
-            return Err(format!("ruleset {:?}, rule {line}: trigger cannot be empty", set.name));
+            return Err(format!(
+                "ruleset {:?}, rule {line}: trigger cannot be empty",
+                set.name
+            ));
         }
 
         if has_tsv_control(&rule.trigger) {

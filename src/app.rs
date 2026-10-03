@@ -706,12 +706,10 @@ impl LexwrightApp {
             match self.buffer.select_expansion_set(&requested_set) {
                 Ok(()) => {
                     self.rule_editor.load_from(&self.buffer);
-                    self.rule_editor.status =
-                        Some(format!("activated ruleset {requested_set:?}"));
+                    self.rule_editor.status = Some(format!("activated ruleset {requested_set:?}"));
                 }
                 Err(error) => {
-                    self.rule_editor.status =
-                        Some(format!("cannot activate ruleset: {error}"));
+                    self.rule_editor.status = Some(format!("cannot activate ruleset: {error}"));
                 }
             }
             return;
@@ -730,8 +728,7 @@ impl LexwrightApp {
                             Some(format!("created and activated ruleset {name:?}"));
                     }
                     Err(error) => {
-                        self.rule_editor.status =
-                            Some(format!("cannot create ruleset: {error}"));
+                        self.rule_editor.status = Some(format!("cannot create ruleset: {error}"));
                     }
                 }
             }
@@ -748,8 +745,7 @@ impl LexwrightApp {
                     ));
                 }
                 Err(error) => {
-                    self.rule_editor.status =
-                        Some(format!("cannot delete ruleset: {error}"));
+                    self.rule_editor.status = Some(format!("cannot delete ruleset: {error}"));
                 }
             }
             return;
