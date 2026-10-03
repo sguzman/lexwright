@@ -259,15 +259,30 @@ NAV is fail-closed against mutation. When the main editor owns focus, the input 
 
 This layer must remain small. Full Vim operators, registers, macros, command mode, configuration language, or modal editing semantics are outside the current contract unless individually justified by Lexwright's writing goals.
 
-## 12. Tabs boundary
+## 12. Durable document tabs
 
-Tabs are the next larger editor-ergonomics feature, but they are not merely UI chrome.
+Tabs are document ownership, not UI chrome.
 
-The first required boundary now exists as `DocumentState`. The single-document UI still renders the same stock `TextEdit` over the same `EditorBuffer`, but the document-owned state has been factored away from application-global chrome/settings. One `DocumentState` now owns its canonical buffer, revision/save clocks, persistence worker, snapshot cache, analysis worker/results, Harper worker/results, live diagnostic revision, and pending document edit state.
+The required boundary is `DocumentState`. One document owns its canonical buffer, revision/save clocks, persistence worker, snapshot cache, analysis worker/results, Harper worker/results, live diagnostic revision, and pending document-edit state. Application-global editor settings and chrome remain outside that object.
 
-This refactor is intentionally behavior-preserving. It does not add tab labels, alternate editor widgets, or a second mutation path. Its purpose is to make the current ledger a real object that can later be multiplied.
+`Workspace` owns the ordered durable document registry and active index. At process start it reads `$XDG_DATA_HOME/lexwright/workspace.tsv` (or `~/.local/share/lexwright/workspace.tsv`), falling back to the historical default ledger when no registry exists. Only the active document is loaded initially. Inactive entries are path/title records until first activation, after which their `DocumentState` remains resident so its independent save/analyzer generations survive tab switches.
 
-The durable storage path is the current document identity. When tab UI is added, each tab must have its own `DocumentState` and its own stable editor ID so cursor/undo state cannot bleed between documents. Inactive documents must retain independent save/analyzer generations, and switching away from an edited document must not strand unsaved text.
+The switching contract is:
 
-Tabs must not be implemented as multiple labels that secretly share one global ledger.
+1. Queue the outgoing document's current revision for persistence.
+2. Take the target's resident `DocumentState`, or lazily load it from its durable path.
+3. Swap the active document and retain the previous `DocumentState` in its workspace slot.
+4. Persist the new active index in the workspace registry.
+5. Reset app-global Vim-lite mode and close document-bound draft/action windows.
+6. If Harper is globally enabled, seed the newly active document's Harper lane explicitly.
+
+Each document's durable path is also part of its egui editor ID. Cursor and undo state therefore belong to the document instead of leaking through one process-global TextEdit ID.
+
+The tabs row is rendered only after Lexwright captures the stable editor viewport width. Adding or changing tab labels therefore has no authority to change the document wrap width.
+
+New `+` documents receive durable `documents/untitled-N.txt` paths. Closing, deleting, hiding, reopening, and reordering are intentionally separate lifecycle operations and are not inferred from one ambiguous close control. Until that policy exists, tabs may be created and switched but not destructively closed.
+
+Expansion configuration remains globally persisted, while each loaded `EditorBuffer` owns its runtime expansion engine/session telemetry. Already-resident documents are not silently hot-reloaded after another document edits the global rules file. Cross-document rule synchronization requires an explicit experiment/telemetry policy before it is added.
+
+Tabs must never become multiple labels that secretly share one global ledger, one undo state, or one analyzer generation.
 
