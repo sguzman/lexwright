@@ -42,8 +42,9 @@ The instrument now has:
 - atomic background saves
 - visible save state
 - a latency-bounded abbreviation engine
-- named, switchable expansion rulesets
+- named, switchable expansion rulesets with notes and rename
 - per-ruleset and per-rule session compression telemetry
+- exportable Markdown expansion-session reports
 - hot-path latency telemetry
 - an O(1) character-to-byte index fast path for ordinary ASCII English
 - a revision-tagged background analysis worker
@@ -204,12 +205,14 @@ The panel lets you:
 - add, edit, and remove user rules
 - keep multiple named expansion rulesets
 - clone the active ruleset into a new experiment
+- rename the active ruleset without losing its session telemetry
+- attach a durable one-line note/hypothesis to each ruleset
 - switch active rulesets explicitly
 - delete old experiments while always retaining at least one set
 - turn the starter rules on or off independently per ruleset
 - override a starter trigger with your own replacement
-- revert a draft back to the currently active rules
-- apply changes live without restarting Lexwright
+- discard a draft back to the currently saved active rules
+- save and activate changes live without restarting Lexwright
 
 Draft editing does not mutate the live matcher. **Save & activate** validates the draft, atomically saves it, and recompiles the reversed trie. That work happens only on the explicit Save & activate action, never on the normal typing path.
 
@@ -234,11 +237,13 @@ The file remains intentionally simple and human-editable. Existing flat files st
 @active	default
 
 @set	default
+@note	baseline everyday shorthand
 @starter	true
 idk	I don't know
 fwiw	for what it's worth
 
 @set	aggressive
+@note	test shorter triggers
 @starter	false
 bc	because
 wld	would
@@ -247,6 +252,14 @@ wld	would
 `@active` chooses the one ruleset compiled into the hot-path trie. Each `@set` owns its own starter-rule setting and user rules. User rules with the same trigger as a starter rule override it. Switching sets rebuilds only on the explicit UI action; normal typing still sees one precompiled matcher.
 
 Lexwright also keeps **session-only compression telemetry per ruleset**. Hover the expansion control for the active set, or inspect the rules window's comparison table to see every set side by side: expansion hits, trigger characters typed, replacement characters produced, percentage of expanded-word characters actually typed, and characters avoided. Zero-hit sets remain visible so experiments have an explicit baseline. Saving a changed ruleset automatically clears that set's prior session measurements so two different rule definitions are never silently blended; the rules window also has an explicit **Reset active stats** action. User-rule rows show their own hit and avoided-character counts, making dead or high-value abbreviations visible directly beside the rule definition. These counters update only when an expansion succeeds; they do not add work to ordinary non-expanding keystrokes.
+
+Each ruleset also carries a one-line **note** so an experiment can record its hypothesis instead of relying on the name alone. **Rename** changes the profile name while keeping its runtime counters attached. **Export report** writes a Markdown snapshot of the current ruleset comparison and active per-rule measurements to:
+
+```text
+$XDG_STATE_HOME/lexwright/expansion-session.md
+```
+
+or `~/.local/state/lexwright/expansion-session.md` when `XDG_STATE_HOME` is unset. Export is an explicit UI action and does no work during normal typing.
 
 The synchronous expansion layer still requires replacements to be at least as long as their triggers. Arbitrary shortening belongs in a later transformation layer because egui's current TextBuffer insertion contract only reports forward cursor advance cleanly.
 
