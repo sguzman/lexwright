@@ -47,6 +47,7 @@ The instrument now has:
 - live word/character/line/paragraph statistics
 - an optional lexical-structure color overlay
 - grammatical-category counts with explicit heuristic labeling
+- an optional prefix/stem/suffix morphology overlay
 - one immutable snapshot shared by autosave and analysis
 - no linguistic analyzer on the input path
 
@@ -126,6 +127,25 @@ Unclassified words remain the normal text color. Hover **structure on/off** for 
 This is scaffolding for the real system, not a claim that suffixes solve part-of-speech tagging. The useful achievement is that revision-tagged linguistic spans can now flow from the background analyzer into the live editor without the classifier entering the typing path.
 
 The overlay is **off by default**. egui invokes a custom TextEdit layouter at least once per frame, so Lexwright does not pay that rendering cost unless the user explicitly asks to see structure.
+
+
+## Morphology overlay
+
+Click **morph off** to switch the editor into orthographic morphology mode. Structure and morphology are mutually exclusive visual modes so their colors never fight each other.
+
+The first morphology pass recognizes a conservative set of productive English prefixes and suffixes and can peel up to two layers from either side. For example:
+
+```text
+unhelpfulness
+un | help | ful | ness
+```
+
+The three visual roles are **prefix**, **stem**, and **suffix**. Hover the morph control for counts of decomposed words, prefixes, and suffixes.
+
+This is explicitly **surface/orthographic morphology**, not full lemmatization. Lexwright does not yet claim that `happi` in `happiness` has been normalized to the lexeme `happy`, or that `runn` in `running` has been normalized to `run`. Those spelling alternations belong in the next lexical layer.
+
+Like the structure overlay, morphology is computed on the background analysis worker and rendered only when its revision exactly matches the current ledger.
+
 
 
 

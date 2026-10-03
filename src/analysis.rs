@@ -102,6 +102,28 @@ impl LexicalCounts {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MorphClass {
+    Prefix,
+    Stem,
+    Suffix,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MorphSpan {
+    pub start: usize,
+    pub end: usize,
+    pub class: MorphClass,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MorphCounts {
+    pub decomposed_words: usize,
+    pub prefixes: usize,
+    pub suffixes: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct TextAnalysis {
     pub revision: u64,
@@ -113,6 +135,8 @@ pub struct TextAnalysis {
     pub elapsed: Duration,
     pub lexical_counts: LexicalCounts,
     pub lexical_spans: Arc<[LexicalSpan]>,
+    pub morph_counts: MorphCounts,
+    pub morph_spans: Arc<[MorphSpan]>,
 }
 
 pub struct AnalysisWorker {
@@ -191,7 +215,8 @@ fn analyze(revision: u64, text: &str) -> TextAnalysis {
         paragraphs += 1;
     }
 
-    let (words, lexical_counts, lexical_spans) = analyze_words(text);
+    let (words, lexical_counts, lexical_spans, morph_counts, morph_spans) =
+        analyze_words(text);
 
     TextAnalysis {
         revision,
@@ -203,13 +228,25 @@ fn analyze(revision: u64, text: &str) -> TextAnalysis {
         elapsed: started.elapsed(),
         lexical_counts,
         lexical_spans: lexical_spans.into(),
+        morph_counts,
+        morph_spans: morph_spans.into(),
     }
 }
 
-fn analyze_words(text: &str) -> (usize, LexicalCounts, Vec<LexicalSpan>) {
+fn analyze_words(
+    text: &str,
+) -> (
+    usize,
+    LexicalCounts,
+    Vec<LexicalSpan>,
+    MorphCounts,
+    Vec<MorphSpan>,
+) {
     let mut words = 0;
     let mut counts = LexicalCounts::default();
     let mut spans = Vec::new();
+    let mut morph_counts = MorphCounts::default();
+    let mut morph_spans = Vec::new();
     let mut iter = text.char_indices().peekable();
 
     while let Some((start, first)) = iter.next() {
@@ -251,9 +288,126 @@ fn analyze_words(text: &str) -> (usize, LexicalCounts, Vec<LexicalSpan>) {
         if let Some(class) = class {
             spans.push(LexicalSpan { start, end, class });
         }
+
+        analyze_morphology(
+            token,
+            start,
+            &mut morph_counts,
+            &mut morph_spans,
+        );
     }
 
-    (words, counts, spans)
+    (words, counts, spans, morph_counts, morph_spans)
+}
+
+
+fn analyze_morphology(
+    word: &str,
+    absolute_start: usize,
+    counts: &mut MorphCounts,
+    spans: &mut Vec<MorphSpan>,
+) {
+    if !word.is_ascii() || word.len() < 5 {
+        return;
+    }
+
+    const PREFIXES: &[&str] = &[
+        "counter", "under", "inter", "trans", "super", "over", "anti", "auto",
+        "post", "pre", "sub", "non", "dis", "mis", "un", "re", "de", "en", "em",
+    ];
+    const SUFFIXES: &[&str] = &[
+        "ization", "isation", "ability", "ibility", "ically", "ingly", "edly",
+        "tion", "sion", "ment", "ness", "ance", "ence", "hood",
+        "ship", "able", "ible", "less", "ful", "ous", "ive", "ize", "ise", "ify",
+        "ing", "est", "ed", "ly", "er", "ism", "ist", "ity", "al", "ic", "s",
+    ];
+
+    let mut prefix_cursor = 0;
+    let mut prefix_ranges = Vec::new();
+
+    for _ in 0..2 {
+        let remaining = &word[prefix_cursor..];
+        let Some(prefix) = PREFIXES.iter().copied().find(|prefix| {
+            remaining.len() >= prefix.len() + 3
+                && starts_with_ascii_case(remaining, prefix)
+        }) else {
+            break;
+        };
+
+        let end = prefix_cursor + prefix.len();
+        prefix_ranges.push((prefix_cursor, end));
+        prefix_cursor = end;
+    }
+
+    let mut suffix_cursor = word.len();
+    let mut suffix_ranges = Vec::new();
+
+    for _ in 0..2 {
+        let remaining = &word[prefix_cursor..suffix_cursor];
+        let Some(suffix) = SUFFIXES.iter().copied().find(|suffix| {
+            if *suffix == "s"
+                && (remaining.len() < 5
+                    || any_eq(remaining, &["this", "his", "is", "was", "has", "us", "yes"])
+                    || remaining.ends_with("ss"))
+            {
+                return false;
+            }
+
+            remaining.len() >= suffix.len() + 3
+                && ends_with_ascii_case(remaining, suffix)
+        }) else {
+            break;
+        };
+
+        let start = suffix_cursor - suffix.len();
+        suffix_ranges.push((start, suffix_cursor));
+        suffix_cursor = start;
+    }
+
+    if prefix_ranges.is_empty() && suffix_ranges.is_empty() {
+        return;
+    }
+
+    if prefix_cursor >= suffix_cursor {
+        return;
+    }
+
+    counts.decomposed_words = counts.decomposed_words.saturating_add(1);
+
+    for (start, end) in prefix_ranges {
+        spans.push(MorphSpan {
+            start: absolute_start + start,
+            end: absolute_start + end,
+            class: MorphClass::Prefix,
+        });
+        counts.prefixes = counts.prefixes.saturating_add(1);
+    }
+
+    spans.push(MorphSpan {
+        start: absolute_start + prefix_cursor,
+        end: absolute_start + suffix_cursor,
+        class: MorphClass::Stem,
+    });
+
+    suffix_ranges.reverse();
+    for (start, end) in suffix_ranges {
+        spans.push(MorphSpan {
+            start: absolute_start + start,
+            end: absolute_start + end,
+            class: MorphClass::Suffix,
+        });
+        counts.suffixes = counts.suffixes.saturating_add(1);
+    }
+}
+
+fn starts_with_ascii_case(word: &str, prefix: &str) -> bool {
+    word.len() >= prefix.len()
+        && word[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+fn ends_with_ascii_case(word: &str, suffix: &str) -> bool {
+    word.len() >= suffix.len()
+        && word[word.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 fn classify_word(word: &str) -> Option<LexicalClass> {
@@ -400,7 +554,9 @@ fn any_suffix(word: &str, suffixes: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LexicalClass, analyze, classify_word};
+    use super::{
+        LexicalClass, MorphClass, analyze, analyze_morphology, classify_word,
+    };
 
     #[test]
     fn counts_basic_text_without_claiming_full_nlp() {
@@ -437,6 +593,47 @@ mod tests {
         assert_eq!(classify_word("quickly"), Some(LexicalClass::AdverbLike));
         assert_eq!(classify_word("running"), Some(LexicalClass::VerbLike));
         assert_eq!(classify_word("happiness"), Some(LexicalClass::NounLike));
+    }
+
+
+    #[test]
+    fn decomposes_multiple_affix_layers_without_claiming_lemmatization() {
+        let mut counts = super::MorphCounts::default();
+        let mut spans = Vec::new();
+        analyze_morphology("unhelpfulness", 0, &mut counts, &mut spans);
+
+        assert_eq!(counts.decomposed_words, 1);
+        assert_eq!(counts.prefixes, 1);
+        assert_eq!(counts.suffixes, 2);
+
+        let pieces: Vec<_> = spans
+            .iter()
+            .map(|span| (&"unhelpfulness"[span.start..span.end], span.class))
+            .collect();
+
+        assert_eq!(
+            pieces,
+            vec![
+                ("un", MorphClass::Prefix),
+                ("help", MorphClass::Stem),
+                ("ful", MorphClass::Suffix),
+                ("ness", MorphClass::Suffix),
+            ]
+        );
+    }
+
+    #[test]
+    fn morphology_ranges_remain_absolute_in_document() {
+        let result = analyze(2, "A very unhelpfulness example");
+        let pieces: Vec<_> = result
+            .morph_spans
+            .iter()
+            .map(|span| (&"A very unhelpfulness example"[span.start..span.end], span.class))
+            .collect();
+
+        assert!(pieces.contains(&("un", MorphClass::Prefix)));
+        assert!(pieces.contains(&("help", MorphClass::Stem)));
+        assert!(pieces.contains(&("ness", MorphClass::Suffix)));
     }
 
     #[test]

@@ -6,7 +6,9 @@ use std::{
 use eframe::egui;
 
 use crate::{
-    analysis::{AnalysisWorker, LexicalClass, LexicalSpan, TextAnalysis},
+    analysis::{
+        AnalysisWorker, LexicalClass, LexicalSpan, MorphClass, MorphSpan, TextAnalysis,
+    },
     editor_buffer::EditorBuffer,
     expansion::ExpansionRule,
     metrics::TimingMetric,
@@ -74,6 +76,7 @@ pub struct LexwrightApp {
     analysis_pending_revision: Option<u64>,
     analysis_error: Option<String>,
     structure_overlay: bool,
+    morphology_overlay: bool,
 }
 
 impl LexwrightApp {
@@ -115,6 +118,7 @@ impl LexwrightApp {
             analysis_pending_revision,
             analysis_error,
             structure_overlay: false,
+            morphology_overlay: false,
         }
     }
 
@@ -486,6 +490,46 @@ impl LexwrightApp {
 
         if response.clicked() {
             self.structure_overlay = !self.structure_overlay;
+            if self.structure_overlay {
+                self.morphology_overlay = false;
+            }
+            self.focus_editor = true;
+        }
+    }
+
+    fn show_morphology_status(&mut self, ui: &mut egui::Ui) {
+        let current = self
+            .analysis_latest
+            .as_ref()
+            .filter(|analysis| analysis.revision == self.revision);
+
+        let label = match (self.morphology_overlay, current.is_some()) {
+            (false, _) => "morph off",
+            (true, true) => "morph on",
+            (true, false) => "morph waiting",
+        };
+
+        let tooltip = if let Some(analysis) = current {
+            format!(
+                "Heuristic orthographic morphology, not lemmatization.\ndecomposed words: {}\nprefixes: {}\nsuffixes: {}\n\nPrefix/stem/suffix colors show surface segmentation. Spelling alternations such as happiness → happy and running → run are not normalized yet.",
+                analysis.morph_counts.decomposed_words,
+                analysis.morph_counts.prefixes,
+                analysis.morph_counts.suffixes,
+            )
+        } else {
+            "Heuristic orthographic morphology. Waiting for analysis of the current revision."
+                .to_owned()
+        };
+
+        let response = ui
+            .selectable_label(self.morphology_overlay, label)
+            .on_hover_text(tooltip);
+
+        if response.clicked() {
+            self.morphology_overlay = !self.morphology_overlay;
+            if self.morphology_overlay {
+                self.structure_overlay = false;
+            }
             self.focus_editor = true;
         }
     }
@@ -580,6 +624,8 @@ impl eframe::App for LexwrightApp {
             ui.separator();
             self.show_structure_status(ui);
             ui.separator();
+            self.show_morphology_status(ui);
+            ui.separator();
             self.show_perf_status(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -590,7 +636,7 @@ impl eframe::App for LexwrightApp {
 
         self.show_rule_editor(ui.ctx());
 
-        let overlay_spans = if self.structure_overlay {
+        let lexical_spans = if self.structure_overlay {
             self.analysis_latest
                 .as_ref()
                 .filter(|analysis| analysis.revision == self.revision)
@@ -599,13 +645,31 @@ impl eframe::App for LexwrightApp {
             None
         };
 
-        let response = if self.structure_overlay {
+        let morph_spans = if self.morphology_overlay {
+            self.analysis_latest
+                .as_ref()
+                .filter(|analysis| analysis.revision == self.revision)
+                .map(|analysis| Arc::clone(&analysis.morph_spans))
+        } else {
+            None
+        };
+
+        let response = if self.structure_overlay || self.morphology_overlay {
+            let morphology_overlay = self.morphology_overlay;
             let mut layouter =
                 |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
                     let text = buffer.as_str();
-                    match overlay_spans.as_deref() {
-                        Some(spans) => lexical_galley(ui, text, wrap_width, spans),
-                        None => plain_galley(ui, text, wrap_width),
+
+                    if morphology_overlay {
+                        match morph_spans.as_deref() {
+                            Some(spans) => morphology_galley(ui, text, wrap_width, spans),
+                            None => plain_galley(ui, text, wrap_width),
+                        }
+                    } else {
+                        match lexical_spans.as_deref() {
+                            Some(spans) => lexical_galley(ui, text, wrap_width, spans),
+                            None => plain_galley(ui, text, wrap_width),
+                        }
                     }
                 };
 
@@ -716,6 +780,67 @@ fn lexical_galley(
     }
 
     ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
+
+fn morphology_galley(
+    ui: &egui::Ui,
+    text: &str,
+    wrap_width: f32,
+    spans: &[MorphSpan],
+) -> Arc<egui::Galley> {
+    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let default_color = ui.visuals().text_color();
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+
+    let default_format = egui::TextFormat {
+        font_id: font_id.clone(),
+        color: default_color,
+        ..Default::default()
+    };
+
+    let mut cursor = 0;
+
+    for span in spans {
+        if span.start < cursor
+            || span.end > text.len()
+            || span.start > span.end
+            || !text.is_char_boundary(span.start)
+            || !text.is_char_boundary(span.end)
+        {
+            continue;
+        }
+
+        if span.start > cursor {
+            job.append(&text[cursor..span.start], 0.0, default_format.clone());
+        }
+
+        job.append(
+            &text[span.start..span.end],
+            0.0,
+            egui::TextFormat {
+                font_id: font_id.clone(),
+                color: morphology_color(span.class),
+                ..Default::default()
+            },
+        );
+        cursor = span.end;
+    }
+
+    if cursor < text.len() {
+        job.append(&text[cursor..], 0.0, default_format);
+    }
+
+    ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
+fn morphology_color(class: MorphClass) -> egui::Color32 {
+    match class {
+        MorphClass::Prefix => egui::Color32::from_rgb(222, 151, 255),
+        MorphClass::Stem => egui::Color32::from_rgb(255, 218, 120),
+        MorphClass::Suffix => egui::Color32::from_rgb(105, 210, 180),
+    }
 }
 
 fn lexical_color(class: LexicalClass) -> egui::Color32 {
