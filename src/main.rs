@@ -6,6 +6,7 @@ mod harper;
 mod jitter;
 mod metrics;
 mod probe;
+mod settings;
 mod storage;
 
 use std::time::Instant;
