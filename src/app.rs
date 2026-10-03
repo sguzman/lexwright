@@ -1080,16 +1080,15 @@ impl eframe::App for LexwrightApp {
             self.structure_overlay || self.morphology_overlay || self.harper_enabled;
 
         let response = if decorations_active {
-            let mut layouter =
-                |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _wrap_width: f32| {
-                    decorated_galley(
-                        ui,
-                        buffer.as_str(),
-                        lexical_spans.as_deref(),
-                        morph_spans.as_deref(),
-                        harper_diagnostics.as_deref(),
-                    )
-                };
+            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _wrap_width: f32| {
+                decorated_galley(
+                    ui,
+                    buffer.as_str(),
+                    lexical_spans.as_deref(),
+                    morph_spans.as_deref(),
+                    harper_diagnostics.as_deref(),
+                )
+            };
 
             let editor = egui::TextEdit::multiline(&mut self.buffer)
                 .font(egui::TextStyle::Monospace)
@@ -1221,9 +1220,7 @@ fn decorated_galley(
             .and_then(|diagnostics| {
                 diagnostics
                     .iter()
-                    .filter(|diagnostic| {
-                        diagnostic.start_byte < end && start < diagnostic.end_byte
-                    })
+                    .filter(|diagnostic| diagnostic.start_byte < end && start < diagnostic.end_byte)
                     .max_by_key(|diagnostic| diagnostic.priority)
             })
             .map_or(egui::Stroke::NONE, |diagnostic| {
