@@ -172,9 +172,9 @@ Arc<str>
 
 The Harper dictionary and curated American-English linter are initialized lazily on the worker after the first request. They never run on the process-start -> first-frame path.
 
-The diagnostics window preserves each issue's exact source span, Harper category, message, priority, and structured replacement/insertion/removal suggestions. Suggestions are **observational in this milestone**: they are shown but cannot yet rewrite the ledger. Applying a suggestion is a canonical editor mutation and will only be added once it can participate in cursor and undo semantics cleanly.
+The diagnostics window preserves each issue's exact source span, Harper category, message, priority, and structured replacement/insertion/removal suggestions. Suggestions can now be applied explicitly. Each apply operation is revision-checked against the snapshot that produced the diagnostic, validates UTF-8 byte boundaries, seeds egui's undo history with the exact pre-fix text/cursor state, moves the cursor deterministically after the replacement, and becomes a normal new Lexwright revision. **Ctrl+Z restores the pre-fix text.**
 
-Harper results are revision-tagged and queued stale snapshots are collapsed before the next grammar pass. A slow Harper pass therefore cannot block typing or delay the lightweight structure/morphology analyzer.
+Harper results are revision-tagged and queued stale snapshots are collapsed before the next grammar pass. If the ledger changes before a suggestion is applied, that suggestion expires rather than editing the wrong bytes. A slow Harper pass therefore cannot block typing or delay the lightweight structure/morphology analyzer.
 
 ## Repeatable latency probe
 

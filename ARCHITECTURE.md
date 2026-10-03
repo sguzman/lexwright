@@ -120,7 +120,22 @@ revision N
 
 The UI discards or visibly marks stale results rather than blocking for a current answer.
 
-No analyzer owns the canonical text. No analyzer may synchronously mutate it.
+No analyzer owns the canonical text. An analyzer never mutates it directly. Analyzer-proposed changes must cross the canonical editor-mutation boundary, carry the revision they were derived from, and fail closed if that revision is stale.
+
+### External editor mutations
+
+Diagnostics and future transformations may propose edits, but they cannot call `String::replace_range` arbitrarily from UI code.
+
+The first canonical external-edit path is used by Harper suggestions. It:
+
+- requires the diagnostic revision to equal the live ledger revision
+- validates byte-range bounds and UTF-8 character boundaries
+- captures the existing egui cursor and text state as an explicit undo point
+- applies the edit through `EditorBuffer::replace_byte_range`
+- stores a deterministic post-edit cursor
+- increments the normal Lexwright revision and therefore reuses autosave and analyzer invalidation
+
+This makes programmatic fixes participate in Ctrl+Z instead of becoming invisible mutations outside the editor's history.
 
 ### Morphology
 
