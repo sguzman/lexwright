@@ -7,14 +7,15 @@ use eframe::egui;
 
 use crate::{
     analysis::{AnalysisWorker, LexicalClass, LexicalSpan, MorphClass, MorphSpan, TextAnalysis},
-    editor_buffer::EditorBuffer,
+    editor_buffer::{EditDelta, EditorBuffer},
     expansion::ExpansionRule,
     harper::{HarperDiagnostic, HarperResult, HarperSuggestion, HarperWorker},
     metrics::TimingMetric,
     storage::{LedgerStore, SaveEvent},
 };
 
-const HARPER_IDLE: Duration = Duration::from_millis(45);
+const HARPER_IDLE: Duration = Duration::from_millis(25);
+const HARPER_DISPLAY_INVALIDATION_BYTES: usize = 192;
 const AUTOSAVE_IDLE: Duration = Duration::from_millis(160);
 const SAVE_STATUS_POLL: Duration = Duration::from_millis(40);
 
@@ -89,6 +90,8 @@ pub struct LexwrightApp {
     harper_worker: HarperWorker,
     harper_enabled: bool,
     harper_latest: Option<HarperResult>,
+    harper_display_revision: Option<u64>,
+    harper_display_diagnostics: Arc<[HarperDiagnostic]>,
     harper_pending_revision: Option<u64>,
     harper_error: Option<String>,
     harper_window: bool,
@@ -149,6 +152,8 @@ impl LexwrightApp {
             harper_worker,
             harper_enabled: false,
             harper_latest: None,
+            harper_display_revision: None,
+            harper_display_diagnostics: Arc::from([]),
             harper_pending_revision,
             harper_error,
             harper_window: false,
@@ -160,7 +165,13 @@ impl LexwrightApp {
     }
 
     fn mark_edited(&mut self, ctx: &egui::Context) {
-        self.revision = self.revision.wrapping_add(1);
+        let previous_revision = self.revision;
+        let next_revision = self.revision.wrapping_add(1);
+        let edits = self.buffer.take_edit_deltas();
+
+        self.rebase_harper_display(previous_revision, next_revision, &edits);
+
+        self.revision = next_revision;
         self.last_edit = Some(Instant::now());
         self.save_error = None;
         self.snapshot_revision = None;
@@ -171,6 +182,54 @@ impl LexwrightApp {
         } else {
             AUTOSAVE_IDLE
         });
+    }
+
+    fn rebase_harper_display(
+        &mut self,
+        previous_revision: u64,
+        next_revision: u64,
+        edits: &[EditDelta],
+    ) {
+        if !self.harper_enabled
+            || self.harper_display_revision != Some(previous_revision)
+            || edits.is_empty()
+        {
+            return;
+        }
+
+        let mut diagnostics = self.harper_display_diagnostics.to_vec();
+
+        for edit in edits {
+            let byte_delta = edit.new_end_byte as isize - edit.old_end_byte as isize;
+            let char_delta = edit.new_end_char as isize - edit.old_end_char as isize;
+            let dirty_start = edit
+                .start_byte
+                .saturating_sub(HARPER_DISPLAY_INVALIDATION_BYTES);
+            let dirty_end = edit
+                .old_end_byte
+                .saturating_add(HARPER_DISPLAY_INVALIDATION_BYTES);
+
+            diagnostics = diagnostics
+                .into_iter()
+                .filter_map(|mut diagnostic| {
+                    if diagnostic.end_byte > dirty_start && diagnostic.start_byte < dirty_end {
+                        return None;
+                    }
+
+                    if diagnostic.start_byte >= edit.old_end_byte {
+                        diagnostic.start_byte = shift_index(diagnostic.start_byte, byte_delta)?;
+                        diagnostic.end_byte = shift_index(diagnostic.end_byte, byte_delta)?;
+                        diagnostic.start_char = shift_index(diagnostic.start_char, char_delta)?;
+                        diagnostic.end_char = shift_index(diagnostic.end_char, char_delta)?;
+                    }
+
+                    Some(diagnostic)
+                })
+                .collect();
+        }
+
+        self.harper_display_diagnostics = diagnostics.into();
+        self.harper_display_revision = Some(next_revision);
     }
 
     fn current_snapshot(&mut self) -> Arc<str> {
@@ -324,6 +383,12 @@ impl LexwrightApp {
                 {
                     self.harper_pending_revision = None;
                 }
+
+                if result.revision == self.revision {
+                    self.harper_display_revision = Some(result.revision);
+                    self.harper_display_diagnostics = Arc::clone(&result.diagnostics);
+                }
+
                 self.harper_latest = Some(result);
             }
         }
@@ -798,14 +863,13 @@ impl LexwrightApp {
     }
 
     fn show_harper_status(&mut self, ui: &mut egui::Ui) {
+        let current_display = self.harper_enabled
+            && self.harper_display_revision == Some(self.revision);
+
         let label = if !self.harper_enabled {
             "harper off".to_owned()
-        } else if let Some(result) = self
-            .harper_latest
-            .as_ref()
-            .filter(|result| result.revision == self.revision)
-        {
-            format!("harper {}", result.diagnostics.len())
+        } else if current_display {
+            format!("harper {}", self.harper_display_diagnostics.len())
         } else if self.harper_pending_revision.is_some() {
             "harper …".to_owned()
         } else {
@@ -817,16 +881,15 @@ impl LexwrightApp {
         } else if !self.harper_enabled {
             "Harper is disabled and consumes no analysis work. Click to open diagnostics/settings."
                 .to_owned()
-        } else if let Some(result) = self
-            .harper_latest
-            .as_ref()
-            .filter(|result| result.revision == self.revision)
-        {
+        } else if let Some(result) = self.harper_latest.as_ref() {
             format!(
-                "Harper 2.11.0 · American English\nrevision: {}\ndiagnostics: {}{}\nHarper CPU: {}\nwork: {} / {} bytes{}\n\nRuns on a separate background worker. Click to inspect suggestions.",
+                "Harper 2.11.0 · American English\nlatest analyzed revision: {}\nlive visible diagnostics: {}\nHarper CPU: {}\nwork: {} / {} bytes{}\n\nUnchanged diagnostics stay visible across edits; only the local dirty neighborhood is invalidated.",
                 result.revision,
-                result.diagnostics.len(),
-                if result.truncated { " (truncated)" } else { "" },
+                if current_display {
+                    self.harper_display_diagnostics.len()
+                } else {
+                    0
+                },
                 format_ns(result.elapsed.as_nanos().min(u64::MAX as u128) as u64),
                 result.linted_bytes,
                 result.total_bytes,
@@ -837,7 +900,7 @@ impl LexwrightApp {
                 },
             )
         } else {
-            "Harper is waiting for the current revision. Click to open diagnostics/settings."
+            "Harper is waiting for its first analysis. Click to open diagnostics/settings."
                 .to_owned()
         };
 
@@ -873,6 +936,8 @@ impl LexwrightApp {
                 } else if !self.harper_enabled && was_enabled {
                     self.harper_pending_revision = None;
                     self.harper_error = None;
+                    self.harper_display_revision = None;
+                    self.harper_display_diagnostics = Arc::from([]);
                 }
 
                 ui.weak(
@@ -891,29 +956,20 @@ impl LexwrightApp {
                     return;
                 }
 
-                let Some(result) = self
-                    .harper_latest
-                    .as_ref()
-                    .filter(|result| result.revision == self.revision)
-                else {
-                    ui.weak("Waiting for Harper to finish the current revision.");
-                    return;
-                };
-
-                if result.diagnostics.is_empty() {
-                    ui.label("No Harper diagnostics for this revision.");
+                if self.harper_display_revision != Some(self.revision) {
+                    ui.weak("Waiting for Harper to establish live diagnostics for this revision.");
                     return;
                 }
 
-                if result.truncated {
-                    ui.weak("Showing the first 256 diagnostics.");
-                    ui.separator();
+                if self.harper_display_diagnostics.is_empty() {
+                    ui.label("No visible Harper diagnostics for this revision.");
+                    return;
                 }
 
                 egui::ScrollArea::vertical()
                     .max_height(480.0)
                     .show(ui, |ui| {
-                        for diagnostic in result.diagnostics.iter() {
+                        for diagnostic in self.harper_display_diagnostics.iter() {
                             let source = self
                                 .buffer
                                 .text()
@@ -954,7 +1010,7 @@ impl LexwrightApp {
                                                 };
 
                                             requested_edit = Some(PendingExternalEdit {
-                                                expected_revision: result.revision,
+                                                expected_revision: self.revision,
                                                 start_byte,
                                                 end_byte,
                                                 replacement,
@@ -1117,11 +1173,10 @@ impl eframe::App for LexwrightApp {
             None
         };
 
-        let harper_diagnostics = if self.harper_enabled {
-            self.harper_latest
-                .as_ref()
-                .filter(|result| result.revision == self.revision)
-                .map(|result| Arc::clone(&result.diagnostics))
+        let harper_diagnostics = if self.harper_enabled
+            && self.harper_display_revision == Some(self.revision)
+        {
+            Some(Arc::clone(&self.harper_display_diagnostics))
         } else {
             None
         };
@@ -1286,35 +1341,50 @@ fn paint_harper_underlines(
             continue;
         }
 
-        let stroke = egui::Stroke::new(1.0, harper_underline_color(diagnostic.kind.as_ref()));
-        let mut row_start = 0usize;
+        let start_cursor = egui::text::CCursor::new(diagnostic.start_char);
+        let mut end_cursor = egui::text::CCursor::new(diagnostic.end_char);
+        end_cursor.prefer_next_row = false;
 
-        for row in &galley.rows {
-            let row_chars = row.glyphs.len();
-            let row_end = row_start.saturating_add(row_chars);
+        let start = galley.layout_from_cursor(start_cursor);
+        let end = galley.layout_from_cursor(end_cursor);
 
-            let start = diagnostic.start_char.max(row_start);
-            let end = diagnostic.end_char.min(row_end);
-
-            if start < end {
-                let local_start = start - row_start;
-                let local_end = end - row_start;
-                let x1 =
-                    galley_pos.x + row.pos.x + row.x_offset(egui::text::CharIndex(local_start));
-                let x2 = galley_pos.x + row.pos.x + row.x_offset(egui::text::CharIndex(local_end));
-                let y = galley_pos.y + row.pos.y + row.max_y() - 1.0;
-
-                if x2 > x1 {
-                    painter.line_segment([egui::pos2(x1, y), egui::pos2(x2, y)], stroke);
-                }
-            }
-
-            row_start = row_end + usize::from(row.ends_with_newline);
-
-            if row_start >= diagnostic.end_char {
-                break;
-            }
+        if start.row >= galley.rows.len() || end.row >= galley.rows.len() || start.row > end.row {
+            continue;
         }
+
+        let stroke = egui::Stroke::new(1.0, harper_underline_color(diagnostic.kind.as_ref()));
+
+        for row_index in start.row..=end.row {
+            let row = &galley.rows[row_index];
+            let left = if row_index == start.row {
+                row.x_offset(start.column)
+            } else {
+                0.0
+            };
+            let right = if row_index == end.row {
+                row.x_offset(end.column)
+            } else {
+                row.size.x
+            };
+
+            if right <= left {
+                continue;
+            }
+
+            let x1 = galley_pos.x + row.pos.x + left;
+            let x2 = galley_pos.x + row.pos.x + right;
+            let y = galley_pos.y + row.pos.y + row.max_y() - 1.0;
+
+            painter.line_segment([egui::pos2(x1, y), egui::pos2(x2, y)], stroke);
+        }
+    }
+}
+
+fn shift_index(index: usize, delta: isize) -> Option<usize> {
+    if delta >= 0 {
+        index.checked_add(delta as usize)
+    } else {
+        index.checked_sub(delta.unsigned_abs())
     }
 }
 

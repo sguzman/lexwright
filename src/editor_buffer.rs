@@ -7,6 +7,16 @@ use crate::{
     metrics::TimingMetric,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EditDelta {
+    pub start_byte: usize,
+    pub old_end_byte: usize,
+    pub new_end_byte: usize,
+    pub start_char: usize,
+    pub old_end_char: usize,
+    pub new_end_char: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IndexStats {
     pub ascii_fast: u64,
@@ -21,6 +31,7 @@ pub struct EditorBuffer {
     insert_timing: TimingMetric,
     expansion_lookup_timing: TimingMetric,
     index_stats: IndexStats,
+    pending_edits: Vec<EditDelta>,
 }
 
 impl EditorBuffer {
@@ -35,11 +46,16 @@ impl EditorBuffer {
             insert_timing: TimingMetric::default(),
             expansion_lookup_timing: TimingMetric::default(),
             index_stats: IndexStats::default(),
+            pending_edits: Vec::new(),
         }
     }
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn take_edit_deltas(&mut self) -> Vec<EditDelta> {
+        std::mem::take(&mut self.pending_edits)
     }
 
     pub fn replace_byte_range(
@@ -56,9 +72,20 @@ impl EditorBuffer {
         }
 
         let start_char = self.text[..range.start].chars().count();
+        let old_end_char = self.text[..range.end].chars().count();
         let replacement_chars = replacement.chars().count();
+        let new_end_byte = range.start.saturating_add(replacement.len());
+        let new_end_char = start_char.saturating_add(replacement_chars);
 
-        self.text.replace_range(range, replacement);
+        self.text.replace_range(range.clone(), replacement);
+        self.pending_edits.push(EditDelta {
+            start_byte: range.start,
+            old_end_byte: range.end,
+            new_end_byte,
+            start_char,
+            old_end_char,
+            new_end_char,
+        });
 
         if self.ascii_only && !replacement.is_ascii() {
             self.ascii_only = false;
@@ -142,7 +169,7 @@ impl EditorBuffer {
         inserted: &str,
         boundary_byte: usize,
         inserted_chars: usize,
-    ) -> Option<usize> {
+    ) -> Option<(usize, usize, usize, usize, usize)> {
         let mut chars = inserted.chars();
         let activation = chars.next()?;
 
@@ -172,7 +199,13 @@ impl EditorBuffer {
         self.expansions_applied = self.expansions_applied.saturating_add(1);
         self.expansion_lookup_timing.observe(lookup_elapsed);
 
-        Some(cursor_advance)
+        Some((
+            cursor_advance,
+            hit.start_byte,
+            hit.trigger_chars,
+            hit.replacement.len(),
+            hit.replacement_chars,
+        ))
     }
 }
 
@@ -202,9 +235,48 @@ impl TextBuffer for EditorBuffer {
         }
 
         let cursor_advance = if self.expansions.enabled() {
-            self.maybe_expand_after_insert(text, byte_index, inserted_chars)
-                .unwrap_or(inserted_chars)
+            if let Some((
+                cursor_advance,
+                expansion_start,
+                trigger_chars,
+                replacement_bytes,
+                replacement_chars,
+            )) = self.maybe_expand_after_insert(text, byte_index, inserted_chars)
+            {
+                let start_char = char_index.0.saturating_sub(trigger_chars);
+                self.pending_edits.push(EditDelta {
+                    start_byte: expansion_start,
+                    old_end_byte: byte_index,
+                    new_end_byte: expansion_start
+                        .saturating_add(replacement_bytes)
+                        .saturating_add(text.len()),
+                    start_char,
+                    old_end_char: char_index.0,
+                    new_end_char: start_char
+                        .saturating_add(replacement_chars)
+                        .saturating_add(inserted_chars),
+                });
+                cursor_advance
+            } else {
+                self.pending_edits.push(EditDelta {
+                    start_byte: byte_index,
+                    old_end_byte: byte_index,
+                    new_end_byte: byte_index.saturating_add(text.len()),
+                    start_char: char_index.0,
+                    old_end_char: char_index.0,
+                    new_end_char: char_index.0.saturating_add(inserted_chars),
+                });
+                inserted_chars
+            }
         } else {
+            self.pending_edits.push(EditDelta {
+                start_byte: byte_index,
+                old_end_byte: byte_index,
+                new_end_byte: byte_index.saturating_add(text.len()),
+                start_char: char_index.0,
+                old_end_char: char_index.0,
+                new_end_char: char_index.0.saturating_add(inserted_chars),
+            });
             inserted_chars
         };
 
@@ -220,6 +292,14 @@ impl TextBuffer for EditorBuffer {
         let start = self.byte_index_for_char(char_range.start);
         let end = self.byte_index_for_char(char_range.end);
         self.text.replace_range(start..end, "");
+        self.pending_edits.push(EditDelta {
+            start_byte: start,
+            old_end_byte: end,
+            new_end_byte: start,
+            start_char: char_range.start.0,
+            old_end_char: char_range.end.0,
+            new_end_char: char_range.start.0,
+        });
 
         // Once Unicode has entered a document, conservatively keep using the UTF-8
         // fallback even if a deletion happened to remove the final non-ASCII codepoint.
@@ -288,6 +368,38 @@ mod tests {
             .expect("valid utf8 edit failed");
         assert_eq!(buffer.text(), "cafe");
         assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn records_exact_insert_and_delete_deltas() {
+        let mut buffer = EditorBuffer::new("abc".to_owned());
+        buffer.insert_text("X", CharIndex(1));
+        let edits = buffer.take_edit_deltas();
+        assert_eq!(
+            edits,
+            vec![super::EditDelta {
+                start_byte: 1,
+                old_end_byte: 1,
+                new_end_byte: 2,
+                start_char: 1,
+                old_end_char: 1,
+                new_end_char: 2,
+            }]
+        );
+
+        buffer.delete_char_range(CharIndex(1)..CharIndex(2));
+        let edits = buffer.take_edit_deltas();
+        assert_eq!(
+            edits,
+            vec![super::EditDelta {
+                start_byte: 1,
+                old_end_byte: 2,
+                new_end_byte: 1,
+                start_char: 1,
+                old_end_char: 2,
+                new_end_char: 1,
+            }]
+        );
     }
 
     #[test]
