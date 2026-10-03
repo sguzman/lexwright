@@ -50,6 +50,7 @@ pub struct EditorBuffer {
     expansions: ExpansionEngine,
     expansions_applied: u64,
     expansion_stats: Vec<(String, ExpansionSessionStats)>,
+    expansion_rule_stats: Vec<(String, String, ExpansionSessionStats)>,
     insert_timing: TimingMetric,
     expansion_lookup_timing: TimingMetric,
     index_stats: IndexStats,
@@ -66,6 +67,7 @@ impl EditorBuffer {
             expansions: ExpansionEngine::load_default(),
             expansions_applied: 0,
             expansion_stats: Vec::new(),
+            expansion_rule_stats: Vec::new(),
             insert_timing: TimingMetric::default(),
             expansion_lookup_timing: TimingMetric::default(),
             index_stats: IndexStats::default(),
@@ -171,6 +173,14 @@ impl EditorBuffer {
             .collect()
     }
 
+    pub fn active_expansion_rule_stats(&self, trigger: &str) -> ExpansionSessionStats {
+        let active = self.expansions.active_set_name();
+        self.expansion_rule_stats
+            .iter()
+            .find(|(set, candidate, _)| set == active && candidate == trigger)
+            .map_or_else(ExpansionSessionStats::default, |(_, _, stats)| *stats)
+    }
+
     pub fn expansion_config_path(&self) -> &std::path::Path {
         self.expansions.config_path()
     }
@@ -204,6 +214,8 @@ impl EditorBuffer {
         self.expansions
             .apply_active_set(starter_enabled, user_rules)?;
         self.expansion_stats.retain(|(name, _)| name != &active);
+        self.expansion_rule_stats
+            .retain(|(set, _, _)| set != &active);
         Ok(())
     }
 
@@ -215,18 +227,24 @@ impl EditorBuffer {
         self.expansions.create_set_from_active(name)?;
         self.expansion_stats
             .retain(|(candidate, _)| candidate != name);
+        self.expansion_rule_stats
+            .retain(|(set, _, _)| set != name);
         Ok(())
     }
 
     pub fn delete_active_expansion_set(&mut self) -> Result<String, String> {
         let removed = self.expansions.delete_active_set()?;
         self.expansion_stats.retain(|(name, _)| name != &removed);
+        self.expansion_rule_stats
+            .retain(|(set, _, _)| set != &removed);
         Ok(removed)
     }
 
     pub fn reset_active_expansion_stats(&mut self) {
         let active = self.expansions.active_set_name().to_owned();
         self.expansion_stats.retain(|(name, _)| name != &active);
+        self.expansion_rule_stats
+            .retain(|(set, _, _)| set != &active);
     }
 
     fn byte_index_for_char(&mut self, char_index: egui::text::CharIndex) -> usize {
@@ -278,11 +296,11 @@ impl EditorBuffer {
         let replacement_bytes = hit.replacement.len();
         let replacement_chars = hit.replacement_chars;
 
-        self.text
-            .replace_range(expansion_start..boundary_byte, hit.replacement);
-        self.expansions_applied = self.expansions_applied.saturating_add(1);
-
+        // Observe only successful expansions. Repeated hits allocate nothing for
+        // telemetry; set/trigger keys are owned only on their first hit.
         let active_set = self.expansions.active_set_name();
+        let trigger = &self.text[expansion_start..boundary_byte];
+
         if let Some((_, stats)) = self
             .expansion_stats
             .iter_mut()
@@ -302,6 +320,29 @@ impl EditorBuffer {
             ));
         }
 
+        if let Some((_, _, stats)) = self
+            .expansion_rule_stats
+            .iter_mut()
+            .find(|(set, candidate, _)| set == active_set && candidate == trigger)
+        {
+            stats.hits = stats.hits.saturating_add(1);
+            stats.trigger_chars = stats.trigger_chars.saturating_add(trigger_chars as u64);
+            stats.output_chars = stats.output_chars.saturating_add(replacement_chars as u64);
+        } else {
+            self.expansion_rule_stats.push((
+                active_set.to_owned(),
+                trigger.to_owned(),
+                ExpansionSessionStats {
+                    hits: 1,
+                    trigger_chars: trigger_chars as u64,
+                    output_chars: replacement_chars as u64,
+                },
+            ));
+        }
+
+        self.text
+            .replace_range(expansion_start..boundary_byte, hit.replacement);
+        self.expansions_applied = self.expansions_applied.saturating_add(1);
         self.expansion_lookup_timing.observe(lookup_elapsed);
 
         Some((
@@ -420,7 +461,7 @@ impl TextBuffer for EditorBuffer {
 mod tests {
     use eframe::egui::{TextBuffer, text::CharIndex};
 
-    use super::EditorBuffer;
+    use super::{EditorBuffer, ExpansionSessionStats};
 
     #[test]
     fn expands_when_space_is_typed_and_advances_cursor() {
@@ -447,6 +488,7 @@ mod tests {
             .apply_expansion_config(true, Vec::new())
             .expect("save failed");
         assert_eq!(buffer.active_expansion_stats().hits, 0);
+        assert_eq!(buffer.active_expansion_rule_stats("bc").hits, 0);
     }
 
     #[test]
@@ -463,6 +505,14 @@ mod tests {
         assert_eq!(stats.output_chars, 7);
         assert_eq!(stats.avoided_chars(), 5);
         assert!((stats.typed_percent() - 28.571).abs() < 0.01);
+
+        let rule_stats = buffer.active_expansion_rule_stats("bc");
+        assert_eq!(rule_stats.hits, 1);
+        assert_eq!(rule_stats.avoided_chars(), 5);
+        assert_eq!(
+            buffer.active_expansion_rule_stats("unused"),
+            ExpansionSessionStats::default()
+        );
     }
 
     #[test]
