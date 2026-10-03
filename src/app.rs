@@ -8,15 +8,16 @@ use std::{
 use eframe::egui;
 
 use crate::{
-    analysis::{AnalysisWorker, LexicalClass, LexicalSpan, MorphClass, MorphSpan, TextAnalysis},
+    analysis::{LexicalClass, LexicalSpan, MorphClass, MorphSpan},
+    document::{DocumentState, PendingExternalEdit},
     editor_buffer::{EditDelta, EditorBuffer},
     expansion::ExpansionRule,
-    harper::{HarperDiagnostic, HarperResult, HarperSuggestion, HarperWorker},
+    harper::{HarperDiagnostic, HarperSuggestion},
     jitter::{JitterFrame, JitterRecorder},
     metrics::TimingMetric,
     navigation::VimLite,
     settings::{self, EditorSettings},
-    storage::{LedgerStore, SaveEvent},
+    storage::SaveEvent,
 };
 
 const HARPER_IDLE: Duration = Duration::from_millis(25);
@@ -87,45 +88,16 @@ impl EditorSettingsEditor {
     }
 }
 
-struct PendingExternalEdit {
-    expected_revision: u64,
-    start_byte: usize,
-    end_byte: usize,
-    replacement: String,
-    description: String,
-}
-
 pub struct LexwrightApp {
-    buffer: EditorBuffer,
-    revision: u64,
-    queued_revision: u64,
-    saved_revision: u64,
-    last_edit: Option<Instant>,
-    save_error: Option<String>,
-    store: LedgerStore,
-    path_label: String,
+    document: DocumentState,
     focus_editor: bool,
     metrics: AppMetrics,
     rule_editor: RuleEditor,
-    analysis_worker: AnalysisWorker,
-    analysis_latest: Option<TextAnalysis>,
-    analysis_pending_revision: Option<u64>,
-    analysis_error: Option<String>,
     structure_overlay: bool,
     morphology_overlay: bool,
     lexeme_window: bool,
-    harper_worker: HarperWorker,
     harper_enabled: bool,
-    harper_latest: Option<HarperResult>,
-    harper_display_revision: Option<u64>,
-    harper_display_diagnostics: Arc<[HarperDiagnostic]>,
-    harper_pending_revision: Option<u64>,
-    harper_error: Option<String>,
     harper_window: bool,
-    pending_external_edit: Option<PendingExternalEdit>,
-    harper_action_status: Option<String>,
-    snapshot_revision: Option<u64>,
-    snapshot_cache: Option<Arc<str>>,
     jitter_recorder: JitterRecorder,
     editor_settings: EditorSettings,
     editor_settings_path: PathBuf,
@@ -142,62 +114,18 @@ impl LexwrightApp {
         apply_cursor_visuals(&mut visuals, &editor_settings);
         cc.egui_ctx.set_visuals(visuals);
 
-        let store = LedgerStore::default();
-        let path_label = store.path().display().to_string();
-        let (text, save_error) = match store.load() {
-            Ok(text) => (text, None),
-            Err(error) => (
-                String::new(),
-                Some(format!("could not load ledger: {error}")),
-            ),
-        };
-
-        let analysis_worker = AnalysisWorker::new();
-        let harper_worker = HarperWorker::new();
-        let initial_snapshot = Arc::<str>::from(text.as_str());
-
-        let (analysis_pending_revision, analysis_error) =
-            match analysis_worker.queue(0, Arc::clone(&initial_snapshot)) {
-                Ok(()) => (Some(0), None),
-                Err(error) => (None, Some(error)),
-            };
-
-        // Harper is intentionally lazy. Merely opening Lexwright must not initialize
-        // its dictionary or compete with the first interactive frame.
-        let harper_pending_revision = None;
-        let harper_error = None;
+        let document = DocumentState::load_default();
 
         Self {
-            buffer: EditorBuffer::new(text),
-            revision: 0,
-            queued_revision: 0,
-            saved_revision: 0,
-            last_edit: None,
-            save_error,
-            store,
-            path_label,
+            document,
             focus_editor: true,
             metrics: AppMetrics::new(process_started),
             rule_editor: RuleEditor::default(),
-            analysis_worker,
-            analysis_latest: None,
-            analysis_pending_revision,
-            analysis_error,
             structure_overlay: false,
             morphology_overlay: false,
             lexeme_window: false,
-            harper_worker,
             harper_enabled: false,
-            harper_latest: None,
-            harper_display_revision: None,
-            harper_display_diagnostics: Arc::from([]),
-            harper_pending_revision,
-            harper_error,
             harper_window: false,
-            pending_external_edit: None,
-            harper_action_status: None,
-            snapshot_revision: Some(0),
-            snapshot_cache: Some(initial_snapshot),
             jitter_recorder: JitterRecorder::new(),
             editor_settings,
             editor_settings_path,
@@ -208,21 +136,21 @@ impl LexwrightApp {
     }
 
     fn mark_edited(&mut self, ctx: &egui::Context) {
-        let edits = self.buffer.take_edit_deltas();
+        let edits = self.document.buffer.take_edit_deltas();
         if edits.is_empty() {
             return;
         }
 
-        let previous_revision = self.revision;
-        let next_revision = self.revision.wrapping_add(1);
+        let previous_revision = self.document.revision;
+        let next_revision = self.document.revision.wrapping_add(1);
 
         self.rebase_harper_display(previous_revision, next_revision, &edits);
 
-        self.revision = next_revision;
-        self.last_edit = Some(Instant::now());
-        self.save_error = None;
-        self.snapshot_revision = None;
-        self.snapshot_cache = None;
+        self.document.revision = next_revision;
+        self.document.last_edit = Some(Instant::now());
+        self.document.save_error = None;
+        self.document.snapshot_revision = None;
+        self.document.snapshot_cache = None;
 
         ctx.request_repaint_after(if self.harper_enabled {
             HARPER_IDLE
@@ -238,13 +166,13 @@ impl LexwrightApp {
         edits: &[EditDelta],
     ) {
         if !self.harper_enabled
-            || self.harper_display_revision != Some(previous_revision)
+            || self.document.harper_display_revision != Some(previous_revision)
             || edits.is_empty()
         {
             return;
         }
 
-        let mut diagnostics = self.harper_display_diagnostics.to_vec();
+        let mut diagnostics = self.document.harper_display_diagnostics.to_vec();
 
         for edit in edits {
             let byte_delta = edit.new_end_byte as isize - edit.old_end_byte as isize;
@@ -275,33 +203,33 @@ impl LexwrightApp {
                 .collect();
         }
 
-        self.harper_display_diagnostics = diagnostics.into();
-        self.harper_display_revision = Some(next_revision);
+        self.document.harper_display_diagnostics = diagnostics.into();
+        self.document.harper_display_revision = Some(next_revision);
     }
 
     fn current_snapshot(&mut self) -> Arc<str> {
-        if self.snapshot_revision == Some(self.revision)
-            && let Some(snapshot) = &self.snapshot_cache
+        if self.document.snapshot_revision == Some(self.document.revision)
+            && let Some(snapshot) = &self.document.snapshot_cache
         {
             return Arc::clone(snapshot);
         }
 
         let started = Instant::now();
-        let snapshot = Arc::<str>::from(self.buffer.text());
+        let snapshot = Arc::<str>::from(self.document.buffer.text());
         self.metrics.snapshot_clone.observe(started.elapsed());
-        self.snapshot_revision = Some(self.revision);
-        self.snapshot_cache = Some(Arc::clone(&snapshot));
+        self.document.snapshot_revision = Some(self.document.revision);
+        self.document.snapshot_cache = Some(Arc::clone(&snapshot));
         snapshot
     }
 
     fn poll_save_events(&mut self) {
-        while let Some(event) = self.store.poll() {
+        while let Some(event) = self.document.store.poll() {
             match event {
                 SaveEvent::Saved { revision, elapsed } => {
                     self.metrics.background_save.observe(elapsed);
-                    self.saved_revision = self.saved_revision.max(revision);
-                    if revision >= self.revision {
-                        self.save_error = None;
+                    self.document.saved_revision = self.document.saved_revision.max(revision);
+                    if revision >= self.document.revision {
+                        self.document.save_error = None;
                     }
                 }
                 SaveEvent::Failed {
@@ -310,8 +238,8 @@ impl LexwrightApp {
                     error,
                 } => {
                     self.metrics.background_save.observe(elapsed);
-                    if revision >= self.saved_revision {
-                        self.save_error = Some(error);
+                    if revision >= self.document.saved_revision {
+                        self.document.save_error = Some(error);
                     }
                 }
             }
@@ -319,36 +247,36 @@ impl LexwrightApp {
     }
 
     fn queue_current_revision(&mut self) {
-        if self.queued_revision >= self.revision {
+        if self.document.queued_revision >= self.document.revision {
             return;
         }
 
-        let revision = self.revision;
+        let revision = self.document.revision;
         let snapshot = self.current_snapshot();
 
-        match self.store.queue_save(revision, Arc::clone(&snapshot)) {
+        match self.document.store.queue_save(revision, Arc::clone(&snapshot)) {
             Ok(()) => {
-                self.queued_revision = revision;
+                self.document.queued_revision = revision;
             }
             Err(error) => {
-                self.save_error = Some(error);
+                self.document.save_error = Some(error);
             }
         }
 
-        match self.analysis_worker.queue(revision, snapshot) {
+        match self.document.analysis_worker.queue(revision, snapshot) {
             Ok(()) => {
-                self.analysis_pending_revision = Some(revision);
-                self.analysis_error = None;
+                self.document.analysis_pending_revision = Some(revision);
+                self.document.analysis_error = None;
             }
             Err(error) => {
-                self.analysis_pending_revision = None;
-                self.analysis_error = Some(error);
+                self.document.analysis_pending_revision = None;
+                self.document.analysis_error = Some(error);
             }
         }
     }
 
     fn poll_analysis(&mut self) {
-        while let Some(result) = self.analysis_worker.poll() {
+        while let Some(result) = self.document.analysis_worker.poll() {
             let should_store = self
                 .analysis_latest
                 .as_ref()
@@ -359,9 +287,9 @@ impl LexwrightApp {
                     .analysis_pending_revision
                     .is_some_and(|pending| result.revision >= pending)
                 {
-                    self.analysis_pending_revision = None;
+                    self.document.analysis_pending_revision = None;
                 }
-                self.analysis_latest = Some(result);
+                self.document.analysis_latest = Some(result);
             }
         }
     }
@@ -370,25 +298,25 @@ impl LexwrightApp {
         if !self.harper_enabled
             || self
                 .harper_pending_revision
-                .is_some_and(|pending| pending >= self.revision)
+                .is_some_and(|pending| pending >= self.document.revision)
             || self
                 .harper_latest
                 .as_ref()
-                .is_some_and(|result| result.revision >= self.revision)
+                .is_some_and(|result| result.revision >= self.document.revision)
         {
             return;
         }
 
-        let revision = self.revision;
+        let revision = self.document.revision;
         let snapshot = self.current_snapshot();
-        match self.harper_worker.queue(revision, snapshot) {
+        match self.document.harper_worker.queue(revision, snapshot) {
             Ok(()) => {
-                self.harper_pending_revision = Some(revision);
-                self.harper_error = None;
+                self.document.harper_pending_revision = Some(revision);
+                self.document.harper_error = None;
             }
             Err(error) => {
-                self.harper_pending_revision = None;
-                self.harper_error = Some(error);
+                self.document.harper_pending_revision = None;
+                self.document.harper_error = Some(error);
             }
         }
     }
@@ -398,7 +326,7 @@ impl LexwrightApp {
             return;
         }
 
-        let Some(last_edit) = self.last_edit else {
+        let Some(last_edit) = self.document.last_edit else {
             return;
         };
 
@@ -413,7 +341,7 @@ impl LexwrightApp {
     }
 
     fn poll_harper(&mut self) {
-        while let Some(result) = self.harper_worker.poll() {
+        while let Some(result) = self.document.harper_worker.poll() {
             if !self.harper_enabled {
                 continue;
             }
@@ -428,26 +356,26 @@ impl LexwrightApp {
                     .harper_pending_revision
                     .is_some_and(|pending| result.revision >= pending)
                 {
-                    self.harper_pending_revision = None;
+                    self.document.harper_pending_revision = None;
                 }
 
-                if result.revision == self.revision {
-                    self.harper_display_revision = Some(result.revision);
-                    self.harper_display_diagnostics = Arc::clone(&result.diagnostics);
+                if result.revision == self.document.revision {
+                    self.document.harper_display_revision = Some(result.revision);
+                    self.document.harper_display_diagnostics = Arc::clone(&result.diagnostics);
                 }
 
-                self.harper_latest = Some(result);
+                self.document.harper_latest = Some(result);
             }
         }
     }
 
     fn apply_pending_external_edit(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
-        let Some(edit) = self.pending_external_edit.take() else {
+        let Some(edit) = self.document.pending_external_edit.take() else {
             return;
         };
 
-        if edit.expected_revision != self.revision {
-            self.harper_action_status = Some(
+        if edit.expected_revision != self.document.revision {
+            self.document.harper_action_status = Some(
                 "suggestion expired because the ledger changed before it was applied".to_owned(),
             );
             return;
@@ -456,14 +384,14 @@ impl LexwrightApp {
         let mut state = egui::TextEdit::load_state(ctx, editor_id).unwrap_or_default();
         let old_cursor = state.cursor.char_range().unwrap_or_else(|| {
             egui::text::CCursorRange::one(egui::text::CCursor::new(
-                self.buffer.text().chars().count(),
+                self.document.buffer.text().chars().count(),
             ))
         });
 
         // Programmatic edits explicitly seed egui's undoer with the pre-edit state.
         // The TextEdit sees the mutated state immediately afterwards, so Ctrl+Z can
         // return to the exact text/cursor state that existed before the suggestion.
-        let old_text = self.buffer.text().to_owned();
+        let old_text = self.document.buffer.text().to_owned();
         let mut undoer = state.undoer();
         undoer.add_undo(&(old_cursor, old_text));
 
@@ -479,23 +407,23 @@ impl LexwrightApp {
 
                 self.mark_edited(ctx);
                 self.focus_editor = true;
-                self.harper_action_status = Some(format!(
+                self.document.harper_action_status = Some(format!(
                     "applied {}; Ctrl+Z restores the previous text",
                     edit.description
                 ));
             }
             Err(error) => {
-                self.harper_action_status = Some(format!("could not apply suggestion: {error}"));
+                self.document.harper_action_status = Some(format!("could not apply suggestion: {error}"));
             }
         }
     }
 
     fn maybe_autosave(&mut self) {
-        if self.queued_revision >= self.revision {
+        if self.document.queued_revision >= self.document.revision {
             return;
         }
 
-        let Some(last_edit) = self.last_edit else {
+        let Some(last_edit) = self.document.last_edit else {
             return;
         };
 
@@ -505,11 +433,11 @@ impl LexwrightApp {
     }
 
     fn show_save_status(&self, ui: &mut egui::Ui) {
-        if let Some(error) = &self.save_error {
+        if let Some(error) = &self.document.save_error {
             ui.weak(format!("save error: {error}"));
-        } else if self.saved_revision >= self.revision {
+        } else if self.document.saved_revision >= self.document.revision {
             ui.weak("saved");
-        } else if self.queued_revision >= self.revision {
+        } else if self.document.queued_revision >= self.document.revision {
             ui.weak("saving");
         } else {
             ui.weak("edited");
@@ -517,39 +445,39 @@ impl LexwrightApp {
     }
 
     fn show_expansion_status(&mut self, ui: &mut egui::Ui) {
-        let enabled = self.buffer.expansions_enabled();
+        let enabled = self.document.buffer.expansions_enabled();
         let label = if enabled {
             format!(
                 "expand on · {} rules · {} hits",
-                self.buffer.expansion_rule_count(),
-                self.buffer.expansion_hits()
+                self.document.buffer.expansion_rule_count(),
+                self.document.buffer.expansion_hits()
             )
         } else {
-            format!("expand off · {} rules", self.buffer.expansion_rule_count())
+            format!("expand off · {} rules", self.document.buffer.expansion_rule_count())
         };
 
-        let stats = self.buffer.active_expansion_stats();
+        let stats = self.document.buffer.active_expansion_stats();
         let response = ui.selectable_label(enabled, label).on_hover_text(format!(
             "Click to toggle.\nActive ruleset: {:?}\nSession hits: {}\nExpanded-word chars typed/output: {}/{} ({:.1}% typed)\nCharacters avoided: {}\nConfig: {}",
-            self.buffer.expansion_active_set_name(),
+            self.document.buffer.expansion_active_set_name(),
             stats.hits,
             stats.trigger_chars,
             stats.output_chars,
             stats.typed_percent(),
             stats.avoided_chars(),
-            self.buffer.expansion_config_path().display()
+            self.document.buffer.expansion_config_path().display()
         ));
 
         if response.clicked() {
-            self.buffer.set_expansions_enabled(!enabled);
+            self.document.buffer.set_expansions_enabled(!enabled);
             self.focus_editor = true;
         }
 
         if ui.small_button("rules").clicked() {
-            self.rule_editor.load_from(&self.buffer);
+            self.rule_editor.load_from(&self.document.buffer);
         }
 
-        if let Some(error) = self.buffer.expansion_config_error() {
+        if let Some(error) = self.document.buffer.expansion_config_error() {
             ui.separator();
             ui.weak("expansion config error").on_hover_text(error);
         }
@@ -560,10 +488,10 @@ impl LexwrightApp {
             return;
         }
 
-        let config_path = self.buffer.expansion_config_path().display().to_string();
-        let set_names = self.buffer.expansion_set_names();
-        let set_stats = self.buffer.expansion_stats_by_set();
-        let active_set = self.buffer.expansion_active_set_name().to_owned();
+        let config_path = self.document.buffer.expansion_config_path().display().to_string();
+        let set_names = self.document.buffer.expansion_set_names();
+        let set_stats = self.document.buffer.expansion_stats_by_set();
+        let active_set = self.document.buffer.expansion_active_set_name().to_owned();
         let mut requested_set = active_set.clone();
         let mut open = self.rule_editor.open;
         let mut save_activate = false;
@@ -738,7 +666,7 @@ impl LexwrightApp {
                                     );
 
                                     let rule_stats =
-                                        self.buffer.active_expansion_rule_stats(&rule.trigger);
+                                        self.document.buffer.active_expansion_rule_stats(&rule.trigger);
                                     ui.monospace(rule_stats.hits.to_string());
                                     ui.monospace(rule_stats.avoided_chars().to_string());
 
@@ -766,7 +694,7 @@ impl LexwrightApp {
                         discard_draft = true;
                     }
 
-                    let stats = self.buffer.active_expansion_stats();
+                    let stats = self.document.buffer.active_expansion_stats();
                     ui.weak(format!(
                         "{:?} · {} draft user rules · starter {} · session {} hits / {} chars avoided",
                         self.rule_editor.active_set,
@@ -851,9 +779,9 @@ impl LexwrightApp {
         self.rule_editor.open = open;
 
         if requested_set != active_set {
-            match self.buffer.select_expansion_set(&requested_set) {
+            match self.document.buffer.select_expansion_set(&requested_set) {
                 Ok(()) => {
-                    self.rule_editor.load_from(&self.buffer);
+                    self.rule_editor.load_from(&self.document.buffer);
                     self.rule_editor.status = Some(format!("activated ruleset {requested_set:?}"));
                 }
                 Err(error) => {
@@ -868,7 +796,7 @@ impl LexwrightApp {
             if name.is_empty() {
                 self.rule_editor.status = Some("ruleset name cannot be empty".to_owned());
             } else {
-                match self.buffer.rename_active_expansion_set(&name) {
+                match self.document.buffer.rename_active_expansion_set(&name) {
                     Ok((previous, current)) => {
                         self.rule_editor.active_set = current.clone();
                         self.rule_editor.rename_set_name = current.clone();
@@ -888,9 +816,9 @@ impl LexwrightApp {
             if name.is_empty() {
                 self.rule_editor.status = Some("new ruleset name cannot be empty".to_owned());
             } else {
-                match self.buffer.create_expansion_set_from_active(&name) {
+                match self.document.buffer.create_expansion_set_from_active(&name) {
                     Ok(()) => {
-                        self.rule_editor.load_from(&self.buffer);
+                        self.rule_editor.load_from(&self.document.buffer);
                         self.rule_editor.new_set_name.clear();
                         self.rule_editor.status =
                             Some(format!("created and activated ruleset {name:?}"));
@@ -904,12 +832,12 @@ impl LexwrightApp {
         }
 
         if delete_set {
-            match self.buffer.delete_active_expansion_set() {
+            match self.document.buffer.delete_active_expansion_set() {
                 Ok(removed) => {
-                    self.rule_editor.load_from(&self.buffer);
+                    self.rule_editor.load_from(&self.document.buffer);
                     self.rule_editor.status = Some(format!(
                         "deleted ruleset {removed:?}; active ruleset is now {:?}",
-                        self.buffer.expansion_active_set_name()
+                        self.document.buffer.expansion_active_set_name()
                     ));
                 }
                 Err(error) => {
@@ -920,7 +848,7 @@ impl LexwrightApp {
         }
 
         if export_report {
-            match export_expansion_report(&self.buffer) {
+            match export_expansion_report(&self.document.buffer) {
                 Ok(path) => {
                     self.rule_editor.status =
                         Some(format!("exported session report to {}", path.display()));
@@ -932,15 +860,15 @@ impl LexwrightApp {
         }
 
         if reset_stats {
-            self.buffer.reset_active_expansion_stats();
+            self.document.buffer.reset_active_expansion_stats();
             self.rule_editor.status = Some(format!(
                 "reset session stats for {:?}",
-                self.buffer.expansion_active_set_name()
+                self.document.buffer.expansion_active_set_name()
             ));
         }
 
         if discard_draft {
-            self.rule_editor.load_from(&self.buffer);
+            self.rule_editor.load_from(&self.document.buffer);
             self.rule_editor.status =
                 Some("discarded draft; reloaded saved active rules".to_owned());
         }
@@ -956,11 +884,11 @@ impl LexwrightApp {
             {
                 Ok(()) => {
                     self.rule_editor.active_set =
-                        self.buffer.expansion_active_set_name().to_owned();
+                        self.document.buffer.expansion_active_set_name().to_owned();
                     self.rule_editor.status = Some(format!(
                         "saved {:?}, compiled {} active rules, and reset its session stats",
-                        self.buffer.expansion_active_set_name(),
-                        self.buffer.expansion_rule_count()
+                        self.document.buffer.expansion_active_set_name(),
+                        self.document.buffer.expansion_rule_count()
                     ));
                 }
                 Err(error) => {
@@ -971,17 +899,17 @@ impl LexwrightApp {
     }
 
     fn show_analysis_status(&self, ui: &mut egui::Ui) {
-        if let Some(error) = &self.analysis_error {
+        if let Some(error) = &self.document.analysis_error {
             ui.weak("analysis error").on_hover_text(error);
             return;
         }
 
-        let Some(analysis) = self.analysis_latest.as_ref() else {
+        let Some(analysis) = self.document.analysis_latest.as_ref() else {
             ui.weak("words …");
             return;
         };
 
-        let stale = analysis.revision < self.revision;
+        let stale = analysis.revision < self.document.revision;
         let label = format!("words {}", analysis.words);
 
         ui.weak(label).on_hover_text(format!(
@@ -1002,7 +930,7 @@ impl LexwrightApp {
         let current = self
             .analysis_latest
             .as_ref()
-            .filter(|analysis| analysis.revision == self.revision);
+            .filter(|analysis| analysis.revision == self.document.revision);
 
         let label = match (self.structure_overlay, current.is_some()) {
             (false, _) => "structure off",
@@ -1046,7 +974,7 @@ impl LexwrightApp {
         let current = self
             .analysis_latest
             .as_ref()
-            .filter(|analysis| analysis.revision == self.revision);
+            .filter(|analysis| analysis.revision == self.document.revision);
 
         let label = match (self.morphology_overlay, current.is_some()) {
             (false, _) => "morph off",
@@ -1083,7 +1011,7 @@ impl LexwrightApp {
         let current = self
             .analysis_latest
             .as_ref()
-            .filter(|analysis| analysis.revision == self.revision);
+            .filter(|analysis| analysis.revision == self.document.revision);
 
         let count = current.map_or(0, |analysis| analysis.lexeme_candidates.len());
         let label = if current.is_some() {
@@ -1123,7 +1051,7 @@ impl LexwrightApp {
                 let Some(analysis) = self
                     .analysis_latest
                     .as_ref()
-                    .filter(|analysis| analysis.revision == self.revision)
+                    .filter(|analysis| analysis.revision == self.document.revision)
                 else {
                     ui.weak("Waiting for analysis of the current revision.");
                     return;
@@ -1149,7 +1077,7 @@ impl LexwrightApp {
                                 ui.end_row();
 
                                 for candidate in analysis.lexeme_candidates.iter() {
-                                    let text = self.buffer.text();
+                                    let text = self.document.buffer.text();
 
                                     let word = text
                                         .get(candidate.word_start..candidate.word_end)
@@ -1173,29 +1101,29 @@ impl LexwrightApp {
 
     fn show_harper_status(&mut self, ui: &mut egui::Ui) {
         let current_display =
-            self.harper_enabled && self.harper_display_revision == Some(self.revision);
+            self.harper_enabled && self.document.harper_display_revision == Some(self.document.revision);
 
         let label = if !self.harper_enabled {
             "harper off".to_owned()
         } else if current_display {
-            format!("harper {}", self.harper_display_diagnostics.len())
-        } else if self.harper_pending_revision.is_some() {
+            format!("harper {}", self.document.harper_display_diagnostics.len())
+        } else if self.document.harper_pending_revision.is_some() {
             "harper …".to_owned()
         } else {
             "harper on".to_owned()
         };
 
-        let tooltip = if let Some(error) = &self.harper_error {
+        let tooltip = if let Some(error) = &self.document.harper_error {
             format!("Harper error: {error}\nClick to open diagnostics/settings.")
         } else if !self.harper_enabled {
             "Harper is disabled and consumes no analysis work. Click to open diagnostics/settings."
                 .to_owned()
-        } else if let Some(result) = self.harper_latest.as_ref() {
+        } else if let Some(result) = self.document.harper_latest.as_ref() {
             format!(
                 "Harper 2.11.0 · American English\nlatest analyzed revision: {}\nlive visible diagnostics: {}{}\nHarper CPU: {}\nwork: {} / {} bytes{}\n\nUnchanged diagnostics stay visible across edits; only the local dirty neighborhood is invalidated.",
                 result.revision,
                 if current_display {
-                    self.harper_display_diagnostics.len()
+                    self.document.harper_display_diagnostics.len()
                 } else {
                     0
                 },
@@ -1248,17 +1176,17 @@ impl LexwrightApp {
                 if self.harper_enabled && !was_enabled {
                     self.queue_harper_current();
                 } else if !self.harper_enabled && was_enabled {
-                    self.harper_pending_revision = None;
-                    self.harper_error = None;
-                    self.harper_display_revision = None;
-                    self.harper_display_diagnostics = Arc::from([]);
+                    self.document.harper_pending_revision = None;
+                    self.document.harper_error = None;
+                    self.document.harper_display_revision = None;
+                    self.document.harper_display_diagnostics = Arc::from([]);
                 }
 
                 ui.weak(
                     "Suggestions apply as revision-checked editor mutations and participate in Ctrl+Z.",
                 );
 
-                if let Some(status) = &self.harper_action_status {
+                if let Some(status) = &self.document.harper_action_status {
                     ui.add_space(4.0);
                     ui.weak(status);
                 }
@@ -1270,12 +1198,12 @@ impl LexwrightApp {
                     return;
                 }
 
-                if self.harper_display_revision != Some(self.revision) {
+                if self.document.harper_display_revision != Some(self.document.revision) {
                     ui.weak("Waiting for Harper to establish live diagnostics for this revision.");
                     return;
                 }
 
-                if self.harper_display_diagnostics.is_empty() {
+                if self.document.harper_display_diagnostics.is_empty() {
                     ui.label("No visible Harper diagnostics for this revision.");
                     return;
                 }
@@ -1283,7 +1211,7 @@ impl LexwrightApp {
                 egui::ScrollArea::vertical()
                     .max_height(480.0)
                     .show(ui, |ui| {
-                        for diagnostic in self.harper_display_diagnostics.iter() {
+                        for diagnostic in self.document.harper_display_diagnostics.iter() {
                             let source = self
                                 .buffer
                                 .text()
@@ -1324,7 +1252,7 @@ impl LexwrightApp {
                                                 };
 
                                             requested_edit = Some(PendingExternalEdit {
-                                                expected_revision: self.revision,
+                                                expected_revision: self.document.revision,
                                                 start_byte,
                                                 end_byte,
                                                 replacement,
@@ -1343,7 +1271,7 @@ impl LexwrightApp {
         self.harper_window = open;
 
         if let Some(edit) = requested_edit {
-            self.pending_external_edit = Some(edit);
+            self.document.pending_external_edit = Some(edit);
         }
     }
 
@@ -1518,7 +1446,7 @@ impl LexwrightApp {
     }
 
     fn show_perf_status(&self, ui: &mut egui::Ui) {
-        let insert = self.buffer.insert_timing();
+        let insert = self.document.buffer.insert_timing();
         let label = if insert.count() == 0 {
             "perf ready".to_owned()
         } else {
@@ -1531,8 +1459,8 @@ impl LexwrightApp {
             .map(|duration| format_ns(duration.as_nanos().min(u64::MAX as u128) as u64))
             .unwrap_or_else(|| "pending".to_owned());
 
-        let expansion = self.buffer.expansion_lookup_timing();
-        let indexes = self.buffer.index_stats();
+        let expansion = self.document.buffer.expansion_lookup_timing();
+        let indexes = self.document.buffer.index_stats();
         let total_indexes = indexes.ascii_fast.saturating_add(indexes.utf8_fallback);
         let ascii_percent = if total_indexes == 0 {
             0.0
@@ -1567,8 +1495,8 @@ impl LexwrightApp {
             format_ns(self.metrics.background_save.last_ns()),
             format_ns(self.metrics.background_save.max_ns()),
             self.jitter_recorder.path().display(),
-            self.buffer.text().len(),
-            if self.buffer.is_ascii_fast_path() {
+            self.document.buffer.text().len(),
+            if self.document.buffer.is_ascii_fast_path() {
                 "ASCII fast"
             } else {
                 "UTF-8 fallback"
@@ -1598,15 +1526,15 @@ impl eframe::App for LexwrightApp {
         self.maybe_queue_harper();
         self.maybe_autosave();
 
-        if self.queued_revision > self.saved_revision
-            || self.analysis_pending_revision.is_some()
-            || self.harper_pending_revision.is_some()
+        if self.document.queued_revision > self.document.saved_revision
+            || self.document.analysis_pending_revision.is_some()
+            || self.document.harper_pending_revision.is_some()
         {
             ui.ctx().request_repaint_after(SAVE_STATUS_POLL);
         }
 
         if self.harper_enabled
-            && let Some(last_edit) = self.last_edit
+            && let Some(last_edit) = self.document.last_edit
             && last_edit.elapsed() < HARPER_IDLE
         {
             ui.ctx()
@@ -1640,7 +1568,7 @@ impl eframe::App for LexwrightApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak("ledger").on_hover_text(&self.path_label);
+                ui.weak("ledger").on_hover_text(&self.document.path_label);
             });
         });
         ui.separator();
@@ -1657,18 +1585,18 @@ impl eframe::App for LexwrightApp {
             .capture(ui, editor_id, self.editor_settings.vim_lite);
 
         let lexical_spans = if self.structure_overlay {
-            self.analysis_latest
+            self.document.analysis_latest
                 .as_ref()
-                .filter(|analysis| analysis.revision == self.revision)
+                .filter(|analysis| analysis.revision == self.document.revision)
                 .map(|analysis| Arc::clone(&analysis.lexical_spans))
         } else {
             None
         };
 
         let morph_spans = if self.morphology_overlay {
-            self.analysis_latest
+            self.document.analysis_latest
                 .as_ref()
-                .filter(|analysis| analysis.revision == self.revision)
+                .filter(|analysis| analysis.revision == self.document.revision)
                 .map(|analysis| Arc::clone(&analysis.morph_spans))
         } else {
             None
@@ -1688,7 +1616,7 @@ impl eframe::App for LexwrightApp {
         let output = ui
             .allocate_ui_with_layout(editor_size, editor_layout, |ui| {
                 if !language_overlay_active {
-                    egui::TextEdit::multiline(&mut self.buffer)
+                    egui::TextEdit::multiline(&mut self.document.buffer)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(ui.available_width())
                         .lock_focus(true)
@@ -1707,7 +1635,7 @@ impl eframe::App for LexwrightApp {
                             )
                         };
 
-                    egui::TextEdit::multiline(&mut self.buffer)
+                    egui::TextEdit::multiline(&mut self.document.buffer)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(ui.available_width())
                         .lock_focus(true)
@@ -1730,14 +1658,14 @@ impl eframe::App for LexwrightApp {
             ui.ctx(),
             editor_id,
             &output.galley,
-            self.buffer.text(),
+            self.document.buffer.text(),
             output.cursor_range,
             nav_command,
         );
 
         let harper_diagnostics =
-            if self.harper_enabled && self.harper_display_revision == Some(self.revision) {
-                Some(Arc::clone(&self.harper_display_diagnostics))
+            if self.harper_enabled && self.document.harper_display_revision == Some(self.document.revision) {
+                Some(Arc::clone(&self.document.harper_display_diagnostics))
             } else {
                 None
             };
@@ -1773,7 +1701,7 @@ impl eframe::App for LexwrightApp {
 
             self.jitter_recorder.record(JitterFrame {
                 elapsed_us: self.metrics.process_started.elapsed().as_micros(),
-                revision: self.revision,
+                revision: self.document.revision,
                 changed: response.changed(),
                 editor_x: response.rect.min.x,
                 editor_y: response.rect.min.y,
@@ -1788,14 +1716,14 @@ impl eframe::App for LexwrightApp {
                 cursor_index,
                 cursor_row,
                 cursor_column,
-                queued_revision: self.queued_revision,
-                saved_revision: self.saved_revision,
+                queued_revision: self.document.queued_revision,
+                saved_revision: self.document.saved_revision,
                 analysis_revision: self
                     .analysis_latest
                     .as_ref()
                     .map(|analysis| analysis.revision),
-                harper_revision: self.harper_latest.as_ref().map(|result| result.revision),
-                expansion_hits: self.buffer.expansion_hits(),
+                harper_revision: self.document.harper_latest.as_ref().map(|result| result.revision),
+                expansion_hits: self.document.buffer.expansion_hits(),
             });
         }
 
@@ -1804,7 +1732,7 @@ impl eframe::App for LexwrightApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.queue_current_revision();
-        let _ = self.store.flush();
+        let _ = self.document.store.flush();
     }
 }
 
