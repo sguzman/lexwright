@@ -1183,45 +1183,49 @@ impl eframe::App for LexwrightApp {
         };
 
         let editor_size = ui.available_size();
-        let editor_width = editor_size.x.max(1.0);
 
-        // The normal writing path is the stock egui TextEdit layouter. Harper is
-        // post-paint only, so enabling Harper cannot replace or perturb text layout.
+        // Restore the exact geometry contract Lexwright used before the editor-jitter
+        // regressions: desired_width(INFINITY) inside the same centered-and-justified
+        // child UI used by Ui::add_sized(ui.available_size(), ...).
         //
-        // Structure/morphology require colored glyph sections, so only those explicit
-        // visual modes opt into our custom layouter.
+        // We reproduce add_sized here only because Harper needs TextEditOutput.galley
+        // for post-paint underlines; the sizing semantics stay identical to add_sized.
+        let editor_layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
         let language_overlay_active = self.structure_overlay || self.morphology_overlay;
 
-        let output = if !language_overlay_active {
-            egui::TextEdit::multiline(&mut self.buffer)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(editor_width)
-                .min_size(editor_size)
-                .lock_focus(true)
-                .hint_text("Write.")
-                .id(editor_id)
-                .show(ui)
-        } else {
-            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-                decorated_galley(
-                    ui,
-                    buffer.as_str(),
-                    wrap_width,
-                    lexical_spans.as_deref(),
-                    morph_spans.as_deref(),
-                )
-            };
+        let output = ui
+            .allocate_ui_with_layout(editor_size, editor_layout, |ui| {
+                if !language_overlay_active {
+                    egui::TextEdit::multiline(&mut self.buffer)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .lock_focus(true)
+                        .hint_text("Write.")
+                        .id(editor_id)
+                        .show(ui)
+                } else {
+                    let mut layouter =
+                        |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+                            decorated_galley(
+                                ui,
+                                buffer.as_str(),
+                                wrap_width,
+                                lexical_spans.as_deref(),
+                                morph_spans.as_deref(),
+                            )
+                        };
 
-            egui::TextEdit::multiline(&mut self.buffer)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(editor_width)
-                .min_size(editor_size)
-                .lock_focus(true)
-                .hint_text("Write.")
-                .id(editor_id)
-                .layouter(&mut layouter)
-                .show(ui)
-        };
+                    egui::TextEdit::multiline(&mut self.buffer)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .lock_focus(true)
+                        .hint_text("Write.")
+                        .id(editor_id)
+                        .layouter(&mut layouter)
+                        .show(ui)
+                }
+            })
+            .inner;
         let response = &output.response;
 
         // TextEdit has already mutated EditorBuffer at this point. Consume those exact
