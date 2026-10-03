@@ -197,6 +197,10 @@ impl EditorBuffer {
         self.expansions.set_names().map(ToOwned::to_owned).collect()
     }
 
+    pub fn expansion_active_set_note(&self) -> &str {
+        &self.expansions.active_set().note
+    }
+
     pub fn expansion_starter_enabled(&self) -> bool {
         self.expansions.active_set().starter_enabled
     }
@@ -207,12 +211,13 @@ impl EditorBuffer {
 
     pub fn apply_expansion_config(
         &mut self,
+        note: String,
         starter_enabled: bool,
         user_rules: Vec<ExpansionRule>,
     ) -> Result<(), String> {
         let active = self.expansions.active_set_name().to_owned();
         self.expansions
-            .apply_active_set(starter_enabled, user_rules)?;
+            .apply_active_set(note, starter_enabled, user_rules)?;
         self.expansion_stats.retain(|(name, _)| name != &active);
         self.expansion_rule_stats
             .retain(|(set, _, _)| set != &active);
@@ -229,6 +234,26 @@ impl EditorBuffer {
             .retain(|(candidate, _)| candidate != name);
         self.expansion_rule_stats.retain(|(set, _, _)| set != name);
         Ok(())
+    }
+
+    pub fn rename_active_expansion_set(&mut self, name: &str) -> Result<(String, String), String> {
+        let previous = self.expansions.rename_active_set(name)?;
+        let current = self.expansions.active_set_name().to_owned();
+
+        if previous != current {
+            for (set, _) in &mut self.expansion_stats {
+                if set == &previous {
+                    *set = current.clone();
+                }
+            }
+            for (set, _, _) in &mut self.expansion_rule_stats {
+                if set == &previous {
+                    *set = current.clone();
+                }
+            }
+        }
+
+        Ok((previous, current))
     }
 
     pub fn delete_active_expansion_set(&mut self) -> Result<String, String> {
@@ -484,7 +509,7 @@ mod tests {
         assert_eq!(buffer.active_expansion_stats().hits, 1);
 
         buffer
-            .apply_expansion_config(true, Vec::new())
+            .apply_expansion_config(String::new(), true, Vec::new())
             .expect("save failed");
         assert_eq!(buffer.active_expansion_stats().hits, 0);
         assert_eq!(buffer.active_expansion_rule_stats("bc").hits, 0);
