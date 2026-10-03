@@ -1,3 +1,4 @@
+mod analysis;
 mod app;
 mod editor_buffer;
 mod expansion;

@@ -51,7 +51,7 @@ Current policy:
 
 The UI thread never performs the disk write.
 
-The current snapshot operation still clones the document string on the UI thread after the idle delay. Its duration is now measured explicitly. A future buffer/storage design must remove document-sized copying from routine persistence once measurements show it matters.
+The current snapshot operation still copies the document once on the UI thread after the idle delay. Its duration is measured explicitly. The snapshot is an immutable `Arc<str>` shared by persistence and analysis, so adding observers does not multiply full-document copies. A future buffer/storage design must remove even this document-sized snapshot copy from routine persistence once measurements show it matters.
 
 ## 3. Programmable input
 
@@ -95,9 +95,13 @@ Instrumentation itself must remain cheap. The timing structure is fixed-size and
 
 ## 5. Analysis model
 
-Future language systems consume versioned document snapshots or edit deltas.
+The analysis lane is now live.
 
-They return results tagged with the revision they analyzed:
+After the same 160 ms idle boundary used for persistence, Lexwright creates one immutable `Arc<str>` snapshot. The save worker and analysis worker receive shared references to that snapshot. The analyzer runs on its own named thread and returns a revision-tagged result.
+
+If analysis falls behind, queued jobs are collapsed to the newest waiting revision before the next pass. Stale work is observationally useless and must never become backpressure on typing.
+
+The first analyzer reports mechanical counts only: words, characters, bytes, lines, and paragraphs. Future systems plug into the same worker boundary:
 
 ```text
 revision N
@@ -108,9 +112,9 @@ revision N
   -> diagnostics(revision N)
 ```
 
-The UI discards or visually marks stale results rather than blocking for a current answer.
+The UI discards or visibly marks stale results rather than blocking for a current answer.
 
-No analyzer owns the canonical text.
+No analyzer owns the canonical text. No analyzer may synchronously mutate it.
 
 ## 6. Failure isolation
 

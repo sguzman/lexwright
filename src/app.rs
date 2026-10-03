@@ -1,8 +1,12 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use eframe::egui;
 
 use crate::{
+    analysis::{AnalysisWorker, TextAnalysis},
     editor_buffer::EditorBuffer,
     expansion::ExpansionRule,
     metrics::TimingMetric,
@@ -65,6 +69,10 @@ pub struct LexwrightApp {
     focus_editor: bool,
     metrics: AppMetrics,
     rule_editor: RuleEditor,
+    analysis_worker: AnalysisWorker,
+    analysis_latest: Option<TextAnalysis>,
+    analysis_pending_revision: Option<u64>,
+    analysis_error: Option<String>,
 }
 
 impl LexwrightApp {
@@ -81,6 +89,14 @@ impl LexwrightApp {
             ),
         };
 
+        let analysis_worker = AnalysisWorker::new();
+        let initial_snapshot = Arc::<str>::from(text.as_str());
+        let (analysis_pending_revision, analysis_error) =
+            match analysis_worker.queue(0, initial_snapshot) {
+                Ok(()) => (Some(0), None),
+                Err(error) => (None, Some(error)),
+            };
+
         Self {
             buffer: EditorBuffer::new(text),
             revision: 0,
@@ -93,6 +109,10 @@ impl LexwrightApp {
             focus_editor: true,
             metrics: AppMetrics::new(process_started),
             rule_editor: RuleEditor::default(),
+            analysis_worker,
+            analysis_latest: None,
+            analysis_pending_revision,
+            analysis_error,
         }
     }
 
@@ -134,15 +154,44 @@ impl LexwrightApp {
 
         let revision = self.revision;
         let clone_started = Instant::now();
-        let snapshot = self.buffer.text().to_owned();
+        let snapshot = Arc::<str>::from(self.buffer.text());
         self.metrics.snapshot_clone.observe(clone_started.elapsed());
 
-        match self.store.queue_save(revision, snapshot) {
+        match self.store.queue_save(revision, Arc::clone(&snapshot)) {
             Ok(()) => {
                 self.queued_revision = revision;
+
+                match self.analysis_worker.queue(revision, snapshot) {
+                    Ok(()) => {
+                        self.analysis_pending_revision = Some(revision);
+                        self.analysis_error = None;
+                    }
+                    Err(error) => {
+                        self.analysis_pending_revision = None;
+                        self.analysis_error = Some(error);
+                    }
+                }
             }
             Err(error) => {
                 self.save_error = Some(error);
+            }
+        }
+    }
+
+    fn poll_analysis(&mut self) {
+        while let Some(result) = self.analysis_worker.poll() {
+            let should_store = self
+                .analysis_latest
+                .is_none_or(|previous| result.revision >= previous.revision);
+
+            if should_store {
+                if self
+                    .analysis_pending_revision
+                    .is_some_and(|pending| result.revision >= pending)
+                {
+                    self.analysis_pending_revision = None;
+                }
+                self.analysis_latest = Some(result);
             }
         }
     }
@@ -365,6 +414,38 @@ impl LexwrightApp {
         }
     }
 
+
+    fn show_analysis_status(&self, ui: &mut egui::Ui) {
+        if let Some(error) = &self.analysis_error {
+            ui.weak("analysis error").on_hover_text(error);
+            return;
+        }
+
+        let Some(analysis) = self.analysis_latest else {
+            ui.weak("words …");
+            return;
+        };
+
+        let stale = analysis.revision < self.revision;
+        let label = if stale {
+            format!("words {} · analyzing", analysis.words)
+        } else {
+            format!("words {}", analysis.words)
+        };
+
+        ui.weak(label).on_hover_text(format!(
+            "revision: {}{}\nwords: {}\ncharacters: {}\nbytes: {}\nlines: {}\nparagraphs: {}\nanalysis CPU: {}",
+            analysis.revision,
+            if stale { " (stale)" } else { "" },
+            analysis.words,
+            analysis.chars,
+            analysis.bytes,
+            analysis.lines,
+            analysis.paragraphs,
+            format_ns(analysis.elapsed.as_nanos().min(u64::MAX as u128) as u64),
+        ));
+    }
+
     fn show_perf_status(&self, ui: &mut egui::Ui) {
         let insert = self.buffer.insert_timing();
         let label = if insert.count() == 0 {
@@ -434,9 +515,12 @@ impl eframe::App for LexwrightApp {
         }
 
         self.poll_save_events();
+        self.poll_analysis();
         self.maybe_autosave();
 
-        if self.queued_revision > self.saved_revision {
+        if self.queued_revision > self.saved_revision
+            || self.analysis_pending_revision.is_some()
+        {
             ui.ctx().request_repaint_after(SAVE_STATUS_POLL);
         }
 
@@ -447,6 +531,8 @@ impl eframe::App for LexwrightApp {
             self.show_save_status(ui);
             ui.separator();
             self.show_expansion_status(ui);
+            ui.separator();
+            self.show_analysis_status(ui);
             ui.separator();
             self.show_perf_status(ui);
 

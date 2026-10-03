@@ -4,13 +4,16 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::{Duration, Instant},
 };
 
 enum Command {
-    Save { revision: u64, text: String },
+    Save { revision: u64, text: Arc<str> },
     Flush(Sender<io::Result<()>>),
 }
 
@@ -69,7 +72,7 @@ impl LedgerStore {
         }
     }
 
-    pub fn queue_save(&self, revision: u64, text: String) -> Result<(), String> {
+    pub fn queue_save(&self, revision: u64, text: Arc<str>) -> Result<(), String> {
         self.command_tx
             .send(Command::Save { revision, text })
             .map_err(|_| "save worker stopped".to_owned())

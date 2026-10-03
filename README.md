@@ -43,6 +43,9 @@ The instrument now has:
 - a latency-bounded abbreviation engine
 - hot-path latency telemetry
 - an O(1) character-to-byte index fast path for ordinary ASCII English
+- a revision-tagged background analysis worker
+- live word/character/line/paragraph statistics
+- one immutable snapshot shared by autosave and analysis
 - no linguistic analyzer on the input path
 
 The expansion matcher is compiled into a reversed trie. Typing an activation character such as a space or punctuation only walks backward through a possible trigger; it does not regex-scan or rescan the document.
@@ -82,6 +85,28 @@ The top bar now includes a compact `perf edit ...` readout. Hover it for:
 The telemetry intentionally distinguishes **CPU work inside Lexwright** from display/compositor latency. We do not claim end-to-end key-to-photon latency from numbers we cannot actually observe.
 
 For normal ASCII English, Lexwright maps egui character indices directly to byte indices in O(1). Once non-ASCII text enters the ledger, it conservatively uses UTF-8 character-index conversion rather than rescanning the entire document merely to decide whether the fast path can be re-enabled.
+
+
+## Background analysis lane
+
+Lexwright now has the first real analysis worker. The top bar shows a live `words N` readout; hover it for characters, bytes, lines, paragraphs, analyzed revision, and analyzer CPU time.
+
+The important part is architectural rather than the simple counts:
+
+```text
+typing
+  -> 160 ms idle boundary
+  -> one Arc<str> snapshot
+       |-> save worker
+       |-> analysis worker
+```
+
+The UI thread copies the ledger once. Persistence and analysis share that immutable snapshot rather than each requesting their own document copy.
+
+Analysis results carry the revision they observed. If the user edits again while analysis is running, the UI can identify the result as stale instead of blocking for a fresh answer. The worker also collapses queued stale jobs to the newest waiting snapshot before beginning its next pass.
+
+The current analyzer intentionally makes only mechanical text counts. POS tagging, morphology, and Harper-class diagnostics will plug into this same worker boundary later; none of them get permission to enter the keystroke path.
+
 
 
 ## Repeatable latency probe
