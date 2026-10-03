@@ -1202,16 +1202,15 @@ impl eframe::App for LexwrightApp {
                 .id(editor_id)
                 .show(ui)
         } else {
-            let mut layouter =
-                |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-                    decorated_galley(
-                        ui,
-                        buffer.as_str(),
-                        wrap_width,
-                        lexical_spans.as_deref(),
-                        morph_spans.as_deref(),
-                    )
-                };
+            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+                decorated_galley(
+                    ui,
+                    buffer.as_str(),
+                    wrap_width,
+                    lexical_spans.as_deref(),
+                    morph_spans.as_deref(),
+                )
+            };
 
             egui::TextEdit::multiline(&mut self.buffer)
                 .font(egui::TextStyle::Monospace)

@@ -105,7 +105,9 @@ Harper is deliberately isolated on its own worker and disabled by default. Its d
 
 The analyzer now reports mechanical counts plus revision-tagged lexical spans. Closed-class English words can be classified directly from small explicit lexicons. Open-class guesses are intentionally named `*-like` because the first pass uses conservative lexical/suffix heuristics rather than pretending to be a statistical POS tagger.
 
-A single editor layouter is installed permanently for plain text plus structure/morphology coloring and always wraps to the TextEdit viewport width. Harper is intentionally excluded from the `LayoutJob`: after `TextEdit::show` returns the final galley, Harper underlines are painted as clipped line segments using egui's own character-cursor -> layout-cursor conversion. Lexwright does not infer document character offsets from glyph counts. A Harper result therefore has no authority over text shaping, line width, or wrapping geometry.
+The ordinary writing path uses egui's stock multiline `TextEdit` layouter with no Lexwright layout override. Harper is intentionally excluded from the `LayoutJob`: after `TextEdit::show` returns the final galley, Harper underlines are painted as clipped line segments using egui's own character-cursor -> layout-cursor conversion. Lexwright does not infer document character offsets from glyph counts.
+
+Structure and morphology are explicit visual modes and require colored layout sections. Only while one of those modes is enabled does Lexwright install its custom layouter. That layouter mirrors egui 0.36.2's stock editor geometry contract: the callback wrap width is used directly, trailing whitespace is preserved, and each section uses the same computed line height as stock TextEdit. Analyzer freshness can change paint data inside that mode, but it does not switch the layout implementation while the mode remains enabled.
 
 Future systems plug into the same worker boundary:
 
