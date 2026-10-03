@@ -1178,13 +1178,6 @@ impl eframe::App for LexwrightApp {
             None
         };
 
-        let harper_diagnostics =
-            if self.harper_enabled && self.harper_display_revision == Some(self.revision) {
-                Some(Arc::clone(&self.harper_display_diagnostics))
-            } else {
-                None
-            };
-
         let editor_size = ui.available_size();
         let editor_width = editor_size.x.max(1.0);
 
@@ -1210,6 +1203,20 @@ impl eframe::App for LexwrightApp {
             .layouter(&mut layouter);
 
         let output = editor.show(ui);
+        let response = &output.response;
+
+        // TextEdit has already mutated EditorBuffer at this point. Consume those exact
+        // deltas before painting any analyzer decoration against the new text.
+        if response.changed() {
+            self.mark_edited(ui.ctx());
+        }
+
+        let harper_diagnostics =
+            if self.harper_enabled && self.harper_display_revision == Some(self.revision) {
+                Some(Arc::clone(&self.harper_display_diagnostics))
+            } else {
+                None
+            };
 
         if let Some(diagnostics) = harper_diagnostics.as_deref() {
             paint_harper_underlines(
@@ -1221,15 +1228,9 @@ impl eframe::App for LexwrightApp {
             );
         }
 
-        let response = &output.response;
-
         if self.focus_editor {
             response.request_focus();
             self.focus_editor = false;
-        }
-
-        if response.changed() {
-            self.mark_edited(ui.ctx());
         }
 
         self.metrics.frame_cpu.observe(frame_started.elapsed());
