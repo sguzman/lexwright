@@ -883,13 +883,14 @@ impl LexwrightApp {
                 .to_owned()
         } else if let Some(result) = self.harper_latest.as_ref() {
             format!(
-                "Harper 2.11.0 · American English\nlatest analyzed revision: {}\nlive visible diagnostics: {}\nHarper CPU: {}\nwork: {} / {} bytes{}\n\nUnchanged diagnostics stay visible across edits; only the local dirty neighborhood is invalidated.",
+                "Harper 2.11.0 · American English\nlatest analyzed revision: {}\nlive visible diagnostics: {}{}\nHarper CPU: {}\nwork: {} / {} bytes{}\n\nUnchanged diagnostics stay visible across edits; only the local dirty neighborhood is invalidated.",
                 result.revision,
                 if current_display {
                     self.harper_display_diagnostics.len()
                 } else {
                     0
                 },
+                if result.truncated { " (source result capped)" } else { "" },
                 format_ns(result.elapsed.as_nanos().min(u64::MAX as u128) as u64),
                 result.linted_bytes,
                 result.total_bytes,
