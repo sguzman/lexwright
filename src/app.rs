@@ -192,10 +192,7 @@ impl LexwrightApp {
             }
         }
 
-        match self
-            .analysis_worker
-            .queue(revision, Arc::clone(&snapshot))
-        {
+        match self.analysis_worker.queue(revision, Arc::clone(&snapshot)) {
             Ok(()) => {
                 self.analysis_pending_revision = Some(revision);
                 self.analysis_error = None;
@@ -238,8 +235,6 @@ impl LexwrightApp {
             }
         }
     }
-
-
 
     fn queue_harper_current(&mut self) {
         if !self.harper_enabled
@@ -613,7 +608,6 @@ impl LexwrightApp {
         }
     }
 
-
     fn show_lexeme_status(&mut self, ui: &mut egui::Ui) {
         let current = self
             .analysis_latest
@@ -705,7 +699,6 @@ impl LexwrightApp {
 
         self.lexeme_window = open;
     }
-
 
     fn show_harper_status(&mut self, ui: &mut egui::Ui) {
         let label = if !self.harper_enabled {

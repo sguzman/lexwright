@@ -245,14 +245,8 @@ fn analyze(revision: u64, text: &str) -> TextAnalysis {
         paragraphs += 1;
     }
 
-    let (
-        words,
-        lexical_counts,
-        lexical_spans,
-        morph_counts,
-        morph_spans,
-        lexeme_candidates,
-    ) = analyze_words(text);
+    let (words, lexical_counts, lexical_spans, morph_counts, morph_spans, lexeme_candidates) =
+        analyze_words(text);
 
     TextAnalysis {
         revision,
@@ -408,9 +402,7 @@ fn analyze_morphology(
         }
     }
 
-    let nearest_suffix = suffix_ranges
-        .last()
-        .map(|(start, end)| &word[*start..*end]);
+    let nearest_suffix = suffix_ranges.last().map(|(start, end)| &word[*start..*end]);
 
     let mut prefix_cursor = 0;
     let mut prefix_ranges = Vec::new();
@@ -418,9 +410,7 @@ fn analyze_morphology(
     for _ in 0..2 {
         let remaining = &word[prefix_cursor..suffix_cursor];
         let Some(prefix) = PREFIXES.iter().copied().find(|prefix| {
-            if remaining.len() < prefix.len() + 3
-                || !starts_with_ascii_case(remaining, prefix)
-            {
+            if remaining.len() < prefix.len() + 3 || !starts_with_ascii_case(remaining, prefix) {
                 return false;
             }
 
@@ -533,15 +523,18 @@ fn suffix_is_supported(word: &str, suffix: &str) -> bool {
         "ness" => {
             let candidate = base_after_one_supported_prefix(stem, Some(suffix));
             is_known_morph_base(&candidate)
-                || any_suffix(stem, &["ful", "less", "ous", "ive", "al", "able", "ible", "ic"])
+                || any_suffix(
+                    stem,
+                    &["ful", "less", "ous", "ive", "al", "able", "ible", "ic"],
+                )
         }
         "ful" | "less" => {
             let candidate = base_after_one_supported_prefix(stem, Some(suffix));
             is_known_morph_base(&candidate)
         }
-        "tion" | "sion" | "ment" | "ance" | "ence" | "hood" | "ship" | "ism" | "ist"
-        | "ity" | "al" | "ic" | "ous" | "ive" | "ize" | "ise" | "ify" | "ization"
-        | "isation" | "ability" | "ibility" | "ically" | "ingly" | "edly" => {
+        "tion" | "sion" | "ment" | "ance" | "ence" | "hood" | "ship" | "ism" | "ist" | "ity"
+        | "al" | "ic" | "ous" | "ive" | "ize" | "ise" | "ify" | "ization" | "isation"
+        | "ability" | "ibility" | "ically" | "ingly" | "edly" => {
             let candidate = base_after_one_supported_prefix(stem, Some(suffix));
             is_known_morph_base(&candidate)
         }
@@ -580,8 +573,7 @@ fn surface_stem_has_productive_shape(stem: &str, suffix: Option<&str>) -> bool {
         return false;
     };
 
-    matches!(suffix, "ness" | "ful" | "less" | "able" | "ible")
-        && stem.len() >= 4
+    matches!(suffix, "ness" | "ful" | "less" | "able" | "ible") && stem.len() >= 4
 }
 
 fn normalize_lexeme(stem: &str, nearest_suffix: Option<&str>) -> (String, LexemeRule) {
@@ -637,17 +629,114 @@ fn is_known_morph_base(word: &str) -> bool {
     any_eq(
         word,
         &[
-            "able", "act", "appear", "ask", "bad", "be", "begin", "believe", "big", "bring",
-            "build", "buy", "call", "care", "change", "consider", "continue", "create", "cut",
-            "decide", "decision", "different", "die", "early", "expect", "fall", "feel", "find",
-            "follow", "give", "good", "great", "grow", "happen", "happy", "hear", "help", "high",
-            "hope", "include", "keep", "kind", "know", "large", "lead", "learn", "leave", "little",
-            "live", "look", "lose", "love", "make", "meet", "move", "need", "new", "old", "open",
-            "offer", "pay", "play", "probable", "provide", "public", "pull", "quick", "raise",
-            "reach", "read", "real", "remain", "remember", "report", "require", "run", "same",
-            "say", "see", "sell", "send", "serve", "set", "show", "sit", "small", "speak", "spend",
-            "stand", "start", "stay", "stop", "suggest", "take", "talk", "tell", "think", "try",
-            "turn", "understand", "use", "wait", "walk", "want", "watch", "win", "work", "write",
+            "able",
+            "act",
+            "appear",
+            "ask",
+            "bad",
+            "be",
+            "begin",
+            "believe",
+            "big",
+            "bring",
+            "build",
+            "buy",
+            "call",
+            "care",
+            "change",
+            "consider",
+            "continue",
+            "create",
+            "cut",
+            "decide",
+            "decision",
+            "different",
+            "die",
+            "early",
+            "expect",
+            "fall",
+            "feel",
+            "find",
+            "follow",
+            "give",
+            "good",
+            "great",
+            "grow",
+            "happen",
+            "happy",
+            "hear",
+            "help",
+            "high",
+            "hope",
+            "include",
+            "keep",
+            "kind",
+            "know",
+            "large",
+            "lead",
+            "learn",
+            "leave",
+            "little",
+            "live",
+            "look",
+            "lose",
+            "love",
+            "make",
+            "meet",
+            "move",
+            "need",
+            "new",
+            "old",
+            "open",
+            "offer",
+            "pay",
+            "play",
+            "probable",
+            "provide",
+            "public",
+            "pull",
+            "quick",
+            "raise",
+            "reach",
+            "read",
+            "real",
+            "remain",
+            "remember",
+            "report",
+            "require",
+            "run",
+            "same",
+            "say",
+            "see",
+            "sell",
+            "send",
+            "serve",
+            "set",
+            "show",
+            "sit",
+            "small",
+            "speak",
+            "spend",
+            "stand",
+            "start",
+            "stay",
+            "stop",
+            "suggest",
+            "take",
+            "talk",
+            "tell",
+            "think",
+            "try",
+            "turn",
+            "understand",
+            "use",
+            "wait",
+            "walk",
+            "want",
+            "watch",
+            "win",
+            "work",
+            "write",
             "young",
         ],
     )
@@ -1068,13 +1157,7 @@ mod tests {
         let mut counts = super::MorphCounts::default();
         let mut spans = Vec::new();
         let mut lexemes = Vec::new();
-        analyze_morphology(
-            "unhelpfulness",
-            0,
-            &mut counts,
-            &mut spans,
-            &mut lexemes,
-        );
+        analyze_morphology("unhelpfulness", 0, &mut counts, &mut spans, &mut lexemes);
 
         assert_eq!(counts.decomposed_words, 1);
         assert_eq!(counts.prefixes, 1);
@@ -1153,9 +1236,11 @@ mod tests {
         assert!(candidates.contains(&("unhelpfulness", "help")));
         assert!(candidates.contains(&("decisions", "decision")));
 
-        assert!(!candidates.iter().any(|(_, lexeme)| {
-            matches!(*lexeme, "ally" | "probab" | "consid" | "cision")
-        }));
+        assert!(
+            !candidates
+                .iter()
+                .any(|(_, lexeme)| { matches!(*lexeme, "ally" | "probab" | "consid" | "cision") })
+        );
     }
 
     #[test]
