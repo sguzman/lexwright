@@ -128,6 +128,7 @@ pub enum LexemeRule {
     IToY,
     UndoubleFinalConsonant,
     RestoreFinalE,
+    RestoreFinalLe,
 }
 
 impl LexemeRule {
@@ -137,6 +138,7 @@ impl LexemeRule {
             Self::IToY => "i→y",
             Self::UndoubleFinalConsonant => "undouble final consonant",
             Self::RestoreFinalE => "restore final e",
+            Self::RestoreFinalLe => "restore final le",
         }
     }
 }
@@ -612,7 +614,15 @@ fn normalize_lexeme(stem: &str, nearest_suffix: Option<&str>) -> (String, Lexeme
         }
     }
 
-    if matches!(suffix, "able" | "ible" | "ly" | "ing" | "ed") {
+    if suffix.eq_ignore_ascii_case("ly") {
+        let mut lexeme = stem.to_owned();
+        lexeme.push_str("le");
+        if is_known_morph_base(&lexeme) {
+            return (lexeme, LexemeRule::RestoreFinalLe);
+        }
+    }
+
+    if matches!(suffix, "able" | "ible" | "ing" | "ed") {
         let mut lexeme = stem.to_owned();
         lexeme.push('e');
         if is_known_morph_base(&lexeme) {
@@ -1101,6 +1111,10 @@ mod tests {
         assert_eq!(
             normalize_lexeme("believ", Some("able")),
             ("believe".to_owned(), LexemeRule::RestoreFinalE)
+        );
+        assert_eq!(
+            normalize_lexeme("probab", Some("ly")),
+            ("probable".to_owned(), LexemeRule::RestoreFinalLe)
         );
         assert_eq!(
             normalize_lexeme("quick", Some("ly")),
