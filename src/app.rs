@@ -14,6 +14,7 @@ use crate::{
     storage::{LedgerStore, SaveEvent},
 };
 
+const HARPER_IDLE: Duration = Duration::from_millis(45);
 const AUTOSAVE_IDLE: Duration = Duration::from_millis(160);
 const SAVE_STATUS_POLL: Duration = Duration::from_millis(40);
 
@@ -93,6 +94,8 @@ pub struct LexwrightApp {
     harper_window: bool,
     pending_external_edit: Option<PendingExternalEdit>,
     harper_action_status: Option<String>,
+    snapshot_revision: Option<u64>,
+    snapshot_cache: Option<Arc<str>>,
 }
 
 impl LexwrightApp {
@@ -114,7 +117,7 @@ impl LexwrightApp {
         let initial_snapshot = Arc::<str>::from(text.as_str());
 
         let (analysis_pending_revision, analysis_error) =
-            match analysis_worker.queue(0, initial_snapshot) {
+            match analysis_worker.queue(0, Arc::clone(&initial_snapshot)) {
                 Ok(()) => (Some(0), None),
                 Err(error) => (None, Some(error)),
             };
@@ -151,6 +154,8 @@ impl LexwrightApp {
             harper_window: false,
             pending_external_edit: None,
             harper_action_status: None,
+            snapshot_revision: Some(0),
+            snapshot_cache: Some(initial_snapshot),
         }
     }
 
@@ -158,7 +163,29 @@ impl LexwrightApp {
         self.revision = self.revision.wrapping_add(1);
         self.last_edit = Some(Instant::now());
         self.save_error = None;
-        ctx.request_repaint_after(AUTOSAVE_IDLE);
+        self.snapshot_revision = None;
+        self.snapshot_cache = None;
+
+        ctx.request_repaint_after(if self.harper_enabled {
+            HARPER_IDLE
+        } else {
+            AUTOSAVE_IDLE
+        });
+    }
+
+    fn current_snapshot(&mut self) -> Arc<str> {
+        if self.snapshot_revision == Some(self.revision)
+            && let Some(snapshot) = &self.snapshot_cache
+        {
+            return Arc::clone(snapshot);
+        }
+
+        let started = Instant::now();
+        let snapshot = Arc::<str>::from(self.buffer.text());
+        self.metrics.snapshot_clone.observe(started.elapsed());
+        self.snapshot_revision = Some(self.revision);
+        self.snapshot_cache = Some(Arc::clone(&snapshot));
+        snapshot
     }
 
     fn poll_save_events(&mut self) {
@@ -191,9 +218,7 @@ impl LexwrightApp {
         }
 
         let revision = self.revision;
-        let clone_started = Instant::now();
-        let snapshot = Arc::<str>::from(self.buffer.text());
-        self.metrics.snapshot_clone.observe(clone_started.elapsed());
+        let snapshot = self.current_snapshot();
 
         match self.store.queue_save(revision, Arc::clone(&snapshot)) {
             Ok(()) => {
@@ -204,7 +229,7 @@ impl LexwrightApp {
             }
         }
 
-        match self.analysis_worker.queue(revision, Arc::clone(&snapshot)) {
+        match self.analysis_worker.queue(revision, snapshot) {
             Ok(()) => {
                 self.analysis_pending_revision = Some(revision);
                 self.analysis_error = None;
@@ -212,19 +237,6 @@ impl LexwrightApp {
             Err(error) => {
                 self.analysis_pending_revision = None;
                 self.analysis_error = Some(error);
-            }
-        }
-
-        if self.harper_enabled {
-            match self.harper_worker.queue(revision, snapshot) {
-                Ok(()) => {
-                    self.harper_pending_revision = Some(revision);
-                    self.harper_error = None;
-                }
-                Err(error) => {
-                    self.harper_pending_revision = None;
-                    self.harper_error = Some(error);
-                }
             }
         }
     }
@@ -253,20 +265,44 @@ impl LexwrightApp {
             || self
                 .harper_pending_revision
                 .is_some_and(|pending| pending >= self.revision)
+            || self
+                .harper_latest
+                .as_ref()
+                .is_some_and(|result| result.revision >= self.revision)
         {
             return;
         }
 
-        let snapshot = Arc::<str>::from(self.buffer.text());
-        match self.harper_worker.queue(self.revision, snapshot) {
+        let revision = self.revision;
+        let snapshot = self.current_snapshot();
+        match self.harper_worker.queue(revision, snapshot) {
             Ok(()) => {
-                self.harper_pending_revision = Some(self.revision);
+                self.harper_pending_revision = Some(revision);
                 self.harper_error = None;
             }
             Err(error) => {
                 self.harper_pending_revision = None;
                 self.harper_error = Some(error);
             }
+        }
+    }
+
+    fn maybe_queue_harper(&mut self) {
+        if !self.harper_enabled {
+            return;
+        }
+
+        let Some(last_edit) = self.last_edit else {
+            return;
+        };
+
+        if last_edit.elapsed() >= HARPER_IDLE {
+            self.queue_harper_current();
+        } else {
+            let remaining = HARPER_IDLE.saturating_sub(last_edit.elapsed());
+            // The caller always has a Context available, so the UI loop requests this
+            // repaint separately after invoking maybe_queue_harper.
+            let _ = remaining;
         }
     }
 
@@ -787,11 +823,14 @@ impl LexwrightApp {
             .filter(|result| result.revision == self.revision)
         {
             format!(
-                "Harper 2.11.0 · American English\nrevision: {}\ndiagnostics: {}{}\nHarper CPU: {}\n\nRuns on a separate background worker. Click to inspect suggestions.",
+                "Harper 2.11.0 · American English\nrevision: {}\ndiagnostics: {}{}\nHarper CPU: {}\nwork: {} / {} bytes{}\n\nRuns on a separate background worker. Click to inspect suggestions.",
                 result.revision,
                 result.diagnostics.len(),
                 if result.truncated { " (truncated)" } else { "" },
                 format_ns(result.elapsed.as_nanos().min(u64::MAX as u128) as u64),
+                result.linted_bytes,
+                result.total_bytes,
+                if result.incremental { " incremental" } else { " full" },
             )
         } else {
             "Harper is waiting for the current revision. Click to open diagnostics/settings."
@@ -1005,6 +1044,7 @@ impl eframe::App for LexwrightApp {
         self.poll_save_events();
         self.poll_analysis();
         self.poll_harper();
+        self.maybe_queue_harper();
         self.maybe_autosave();
 
         if self.queued_revision > self.saved_revision
@@ -1012,6 +1052,14 @@ impl eframe::App for LexwrightApp {
             || self.harper_pending_revision.is_some()
         {
             ui.ctx().request_repaint_after(SAVE_STATUS_POLL);
+        }
+
+        if self.harper_enabled
+            && let Some(last_edit) = self.last_edit
+            && last_edit.elapsed() < HARPER_IDLE
+        {
+            ui.ctx()
+                .request_repaint_after(HARPER_IDLE.saturating_sub(last_edit.elapsed()));
         }
 
         ui.add_space(6.0);
@@ -1074,11 +1122,11 @@ impl eframe::App for LexwrightApp {
             None
         };
 
-        // The editor ALWAYS uses the same layouter. Analyzer state may change paint
-        // attributes, but it must never switch the text geometry implementation.
         let editor_size = ui.available_size();
         let editor_width = editor_size.x.max(1.0);
 
+        // Harper is deliberately NOT part of this LayoutJob. Structure/morphology may
+        // color glyphs, but Harper only paints after text geometry is already final.
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
             decorated_galley(
                 ui,
@@ -1086,19 +1134,31 @@ impl eframe::App for LexwrightApp {
                 wrap_width,
                 lexical_spans.as_deref(),
                 morph_spans.as_deref(),
-                harper_diagnostics.as_deref(),
             )
         };
 
         let editor = egui::TextEdit::multiline(&mut self.buffer)
             .font(egui::TextStyle::Monospace)
             .desired_width(editor_width)
+            .min_size(editor_size)
             .lock_focus(true)
             .hint_text("Write.")
             .id(editor_id)
             .layouter(&mut layouter);
 
-        let response = ui.add_sized(editor_size, editor);
+        let output = editor.show(ui);
+
+        if let Some(diagnostics) = harper_diagnostics.as_deref() {
+            paint_harper_underlines(
+                ui,
+                &output.galley,
+                output.galley_pos,
+                output.text_clip_rect,
+                diagnostics,
+            );
+        }
+
+        let response = &output.response;
 
         if self.focus_editor {
             response.request_focus();
@@ -1124,7 +1184,6 @@ fn decorated_galley(
     wrap_width: f32,
     lexical_spans: Option<&[LexicalSpan]>,
     morph_spans: Option<&[MorphSpan]>,
-    harper_diagnostics: Option<&[HarperDiagnostic]>,
 ) -> Arc<egui::Galley> {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
     let default_color = ui.visuals().text_color();
@@ -1150,8 +1209,7 @@ fn decorated_galley(
 
     let mut boundaries = Vec::with_capacity(
         2 + lexical_spans.map_or(0, |spans| spans.len() * 2)
-            + morph_spans.map_or(0, |spans| spans.len() * 2)
-            + harper_diagnostics.map_or(0, |diagnostics| diagnostics.len() * 2),
+            + morph_spans.map_or(0, |spans| spans.len() * 2),
     );
     boundaries.push(0);
     boundaries.push(text.len());
@@ -1165,17 +1223,6 @@ fn decorated_galley(
     if let Some(spans) = morph_spans {
         for span in spans {
             push_valid_boundaries(text, &mut boundaries, span.start, span.end);
-        }
-    }
-
-    if let Some(diagnostics) = harper_diagnostics {
-        for diagnostic in diagnostics {
-            push_valid_boundaries(
-                text,
-                &mut boundaries,
-                diagnostic.start_byte,
-                diagnostic.end_byte,
-            );
         }
     }
 
@@ -1207,30 +1254,69 @@ fn decorated_galley(
             })
             .unwrap_or(default_color);
 
-        let underline = harper_diagnostics
-            .and_then(|diagnostics| {
-                diagnostics
-                    .iter()
-                    .filter(|diagnostic| diagnostic.start_byte < end && start < diagnostic.end_byte)
-                    .max_by_key(|diagnostic| diagnostic.priority)
-            })
-            .map_or(egui::Stroke::NONE, |diagnostic| {
-                egui::Stroke::new(1.0, harper_underline_color(diagnostic.kind.as_ref()))
-            });
-
         job.append(
             &text[start..end],
             0.0,
             egui::TextFormat {
                 font_id: font_id.clone(),
                 color,
-                underline,
                 ..Default::default()
             },
         );
     }
 
     ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
+fn paint_harper_underlines(
+    ui: &egui::Ui,
+    galley: &egui::Galley,
+    galley_pos: egui::Pos2,
+    clip_rect: egui::Rect,
+    diagnostics: &[HarperDiagnostic],
+) {
+    let painter = ui.painter_at(clip_rect);
+
+    for diagnostic in diagnostics {
+        if diagnostic.start_char >= diagnostic.end_char {
+            continue;
+        }
+
+        let stroke = egui::Stroke::new(
+            1.0,
+            harper_underline_color(diagnostic.kind.as_ref()),
+        );
+        let mut row_start = 0usize;
+
+        for row in &galley.rows {
+            let row_chars = row.glyphs.len();
+            let row_end = row_start.saturating_add(row_chars);
+
+            let start = diagnostic.start_char.max(row_start);
+            let end = diagnostic.end_char.min(row_end);
+
+            if start < end {
+                let local_start = start - row_start;
+                let local_end = end - row_start;
+                let x1 = galley_pos.x + row.pos.x + row.x_offset(local_start);
+                let x2 = galley_pos.x + row.pos.x + row.x_offset(local_end);
+                let y = galley_pos.y + row.pos.y + row.max_y() - 1.0;
+
+                if x2 > x1 {
+                    painter.line_segment(
+                        [egui::pos2(x1, y), egui::pos2(x2, y)],
+                        stroke,
+                    );
+                }
+            }
+
+            row_start = row_end + usize::from(row.ends_with_newline);
+
+            if row_start >= diagnostic.end_char {
+                break;
+            }
+        }
+    }
 }
 
 fn push_valid_boundaries(text: &str, boundaries: &mut Vec<usize>, start: usize, end: usize) {
