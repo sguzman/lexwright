@@ -83,6 +83,20 @@ The telemetry intentionally distinguishes **CPU work inside Lexwright** from dis
 
 For normal ASCII English, Lexwright maps egui character indices directly to byte indices in O(1). Once non-ASCII text enters the ledger, it conservatively uses UTF-8 character-index conversion rather than rescanning the entire document merely to decide whether the fast path can be re-enabled.
 
+
+## Repeatable latency probe
+
+For a deterministic scaling check that runs without opening the GUI:
+
+```bash
+cargo run --release -- --latency-probe
+```
+
+The probe measures append edits, middle-of-document edits, and snapshot cloning at 4 KiB, 64 KiB, 1 MiB, and 8 MiB ledger sizes. It prints CPU-side timings only; it does not pretend to measure keyboard hardware, compositor, scanout, or display response.
+
+This exists to answer a concrete engineering question: **at what document size does the current contiguous String stop being good enough on the actual machine?**
+
+
 ## Custom expansion rules
 
 User rules are read once at startup from:

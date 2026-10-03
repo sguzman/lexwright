@@ -2,6 +2,7 @@ mod app;
 mod editor_buffer;
 mod expansion;
 mod metrics;
+mod probe;
 mod storage;
 
 use std::time::Instant;
@@ -9,6 +10,11 @@ use std::time::Instant;
 use app::LexwrightApp;
 
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|argument| argument == "--latency-probe") {
+        probe::run();
+        return Ok(());
+    }
+
     let process_started = Instant::now();
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
