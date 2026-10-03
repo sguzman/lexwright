@@ -18,6 +18,7 @@ use crate::{
     navigation::VimLite,
     settings::{self, EditorSettings},
     storage::SaveEvent,
+    workspace::Workspace,
 };
 
 const HARPER_IDLE: Duration = Duration::from_millis(25);
@@ -90,6 +91,7 @@ impl EditorSettingsEditor {
 
 pub struct LexwrightApp {
     document: DocumentState,
+    workspace: Workspace,
     focus_editor: bool,
     metrics: AppMetrics,
     rule_editor: RuleEditor,
@@ -114,10 +116,11 @@ impl LexwrightApp {
         apply_cursor_visuals(&mut visuals, &editor_settings);
         cc.egui_ctx.set_visuals(visuals);
 
-        let document = DocumentState::load_default();
+        let (workspace, document) = Workspace::load_default();
 
         Self {
             document,
+            workspace,
             focus_editor: true,
             metrics: AppMetrics::new(process_started),
             rule_editor: RuleEditor::default(),
@@ -423,6 +426,96 @@ impl LexwrightApp {
         if last_edit.elapsed() >= AUTOSAVE_IDLE {
             self.queue_current_revision();
         }
+    }
+
+    fn show_document_tabs(&mut self, ui: &mut egui::Ui) {
+        let active_index = self.workspace.active_index();
+        let mut switch_to = None;
+        let mut create = false;
+
+        ui.horizontal(|ui| {
+            ui.strong("documents");
+            ui.separator();
+
+            for index in 0..self.workspace.len() {
+                let title = self.workspace.title(index).unwrap_or("document");
+                let path = self
+                    .workspace
+                    .path(index)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "unknown document path".to_owned());
+
+                if ui
+                    .selectable_label(index == active_index, title)
+                    .on_hover_text(path)
+                    .clicked()
+                {
+                    switch_to = Some(index);
+                }
+            }
+
+            if ui
+                .small_button("+")
+                .on_hover_text("Create a new durable Lexwright document and activate its tab.")
+                .clicked()
+            {
+                create = true;
+            }
+
+            if let Some(error) = self.workspace.error() {
+                ui.separator();
+                ui.weak("workspace error").on_hover_text(format!(
+                    "{error}\nRegistry: {}",
+                    self.workspace.registry_path().display()
+                ));
+            }
+        });
+
+        if create {
+            self.queue_current_revision();
+            let result = {
+                let workspace = &mut self.workspace;
+                let document = &mut self.document;
+                workspace.create_and_activate(document)
+            };
+
+            if result.is_ok() {
+                self.after_document_switch(ui.ctx());
+            }
+        } else if let Some(target_index) = switch_to
+            && target_index != active_index
+        {
+            self.queue_current_revision();
+            let result = {
+                let workspace = &mut self.workspace;
+                let document = &mut self.document;
+                workspace.switch_to(document, target_index)
+            };
+
+            if result.is_ok() {
+                self.after_document_switch(ui.ctx());
+            }
+        }
+    }
+
+    fn after_document_switch(&mut self, ctx: &egui::Context) {
+        self.focus_editor = true;
+        self.vim_lite.reset();
+
+        // Never carry a document-bound draft/action window across a tab switch.
+        self.rule_editor.open = false;
+        self.lexeme_window = false;
+        self.harper_window = false;
+        self.document.pending_external_edit = None;
+        self.document.harper_action_status = None;
+
+        // A lazily loaded tab starts with its own analyzer state. If Harper is globally
+        // enabled, explicitly seed this document instead of waiting for its first edit.
+        if self.harper_enabled {
+            self.queue_harper_current();
+        }
+
+        ctx.request_repaint();
     }
 
     fn show_save_status(&self, ui: &mut egui::Ui) {
@@ -1555,9 +1648,12 @@ impl eframe::App for LexwrightApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak("ledger").on_hover_text(&self.document.path_label);
+                ui.weak("document")
+                    .on_hover_text(&self.document.path_label);
             });
         });
+        ui.separator();
+        self.show_document_tabs(ui);
         ui.separator();
 
         self.show_rule_editor(ui.ctx());
@@ -1565,7 +1661,10 @@ impl eframe::App for LexwrightApp {
         self.show_harper_window(ui.ctx());
         self.show_editor_settings_window(ui.ctx());
 
-        let editor_id = egui::Id::new("lexwright-ledger-editor");
+        let editor_id = egui::Id::new((
+            "lexwright-ledger-editor",
+            self.document.path_label.as_str(),
+        ));
         self.apply_pending_external_edit(ui.ctx(), editor_id);
         let nav_command = self
             .vim_lite
@@ -1718,6 +1817,7 @@ impl eframe::App for LexwrightApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.queue_current_revision();
         let _ = self.document.store.flush();
+        let _ = self.workspace.flush_inactive();
     }
 }
 
