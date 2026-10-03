@@ -277,14 +277,12 @@ impl LexwrightApp {
 
     fn poll_analysis(&mut self) {
         while let Some(result) = self.document.analysis_worker.poll() {
-            let should_store = self
-                .analysis_latest
+            let should_store = self.document.analysis_latest
                 .as_ref()
                 .is_none_or(|previous| result.revision >= previous.revision);
 
             if should_store {
-                if self
-                    .analysis_pending_revision
+                if self.document.analysis_pending_revision
                     .is_some_and(|pending| result.revision >= pending)
                 {
                     self.document.analysis_pending_revision = None;
@@ -296,11 +294,9 @@ impl LexwrightApp {
 
     fn queue_harper_current(&mut self) {
         if !self.harper_enabled
-            || self
-                .harper_pending_revision
+            || self.document.harper_pending_revision
                 .is_some_and(|pending| pending >= self.document.revision)
-            || self
-                .harper_latest
+            || self.document.harper_latest
                 .as_ref()
                 .is_some_and(|result| result.revision >= self.document.revision)
         {
@@ -346,14 +342,12 @@ impl LexwrightApp {
                 continue;
             }
 
-            let should_store = self
-                .harper_latest
+            let should_store = self.document.harper_latest
                 .as_ref()
                 .is_none_or(|previous| result.revision >= previous.revision);
 
             if should_store {
-                if self
-                    .harper_pending_revision
+                if self.document.harper_pending_revision
                     .is_some_and(|pending| result.revision >= pending)
                 {
                     self.document.harper_pending_revision = None;
@@ -395,8 +389,7 @@ impl LexwrightApp {
         let mut undoer = state.undoer();
         undoer.add_undo(&(old_cursor, old_text));
 
-        match self
-            .buffer
+        match self.document.buffer
             .replace_byte_range(edit.start_byte..edit.end_byte, &edit.replacement)
         {
             Ok(cursor_char) => {
@@ -878,8 +871,7 @@ impl LexwrightApp {
             let starter_enabled = self.rule_editor.starter_enabled;
             let rules = self.rule_editor.rules.clone();
 
-            match self
-                .buffer
+            match self.document.buffer
                 .apply_expansion_config(note, starter_enabled, rules)
             {
                 Ok(()) => {
@@ -927,8 +919,7 @@ impl LexwrightApp {
     }
 
     fn show_structure_status(&mut self, ui: &mut egui::Ui) {
-        let current = self
-            .analysis_latest
+        let current = self.document.analysis_latest
             .as_ref()
             .filter(|analysis| analysis.revision == self.document.revision);
 
@@ -971,8 +962,7 @@ impl LexwrightApp {
     }
 
     fn show_morphology_status(&mut self, ui: &mut egui::Ui) {
-        let current = self
-            .analysis_latest
+        let current = self.document.analysis_latest
             .as_ref()
             .filter(|analysis| analysis.revision == self.document.revision);
 
@@ -1008,8 +998,7 @@ impl LexwrightApp {
     }
 
     fn show_lexeme_status(&mut self, ui: &mut egui::Ui) {
-        let current = self
-            .analysis_latest
+        let current = self.document.analysis_latest
             .as_ref()
             .filter(|analysis| analysis.revision == self.document.revision);
 
@@ -1048,8 +1037,7 @@ impl LexwrightApp {
                 );
                 ui.add_space(6.0);
 
-                let Some(analysis) = self
-                    .analysis_latest
+                let Some(analysis) = self.document.analysis_latest
                     .as_ref()
                     .filter(|analysis| analysis.revision == self.document.revision)
                 else {
@@ -1212,8 +1200,7 @@ impl LexwrightApp {
                     .max_height(480.0)
                     .show(ui, |ui| {
                         for diagnostic in self.document.harper_display_diagnostics.iter() {
-                            let source = self
-                                .buffer
+                            let source = self.document.buffer
                                 .text()
                                 .get(diagnostic.start_byte..diagnostic.end_byte)
                                 .unwrap_or("?");
@@ -1686,8 +1673,7 @@ impl eframe::App for LexwrightApp {
         }
 
         let should_trace = response.changed()
-            || self
-                .last_edit
+            || self.document.last_edit
                 .is_some_and(|last_edit| last_edit.elapsed() <= Duration::from_millis(500));
 
         if should_trace {
@@ -1718,8 +1704,7 @@ impl eframe::App for LexwrightApp {
                 cursor_column,
                 queued_revision: self.document.queued_revision,
                 saved_revision: self.document.saved_revision,
-                analysis_revision: self
-                    .analysis_latest
+                analysis_revision: self.document.analysis_latest
                     .as_ref()
                     .map(|analysis| analysis.revision),
                 harper_revision: self.document.harper_latest.as_ref().map(|result| result.revision),
