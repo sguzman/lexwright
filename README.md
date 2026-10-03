@@ -47,6 +47,7 @@ The instrument now has:
 - exportable Markdown expansion-session reports
 - durable cursor ergonomics controls
 - opt-in, non-mutating Vim-lite navigation
+- explicit per-document state boundary for future durable tabs
 - hot-path latency telemetry
 - an O(1) character-to-byte index fast path for ordinary ASCII English
 - a revision-tagged background analysis worker
@@ -375,7 +376,7 @@ Near-term work is intentionally ordered by dependency, not spectacle:
 
 - collect real latency measurements on normal and large ledgers
 - decide the custom editor-buffer boundary from those measurements
-- define the per-document state boundary for durable tabs
+- build the durable tab/workspace layer on the new per-document state boundary
 - deepen expansion experimentation beyond named rulesets
 - deepen Harper incremental edit provenance beyond snapshot diffing
 - deepen token/POS accuracy beyond the current heuristic overlay
