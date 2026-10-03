@@ -48,6 +48,15 @@ impl VimLite {
         self.vertical_x = None;
     }
 
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            VimMode::Insert => VimMode::Nav,
+            VimMode::Nav => VimMode::Insert,
+        };
+        self.pending_g = false;
+        self.vertical_x = None;
+    }
+
     pub fn capture(
         &mut self,
         ui: &mut egui::Ui,
