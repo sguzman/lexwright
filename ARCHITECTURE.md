@@ -71,13 +71,13 @@ Current invariants:
 
 Starter rules are compiled into the binary. User rules are stored in `$XDG_CONFIG_HOME/lexwright/expansions.tsv` (or `~/.config/lexwright/expansions.tsv`) and override starter rules by trigger.
 
-The in-app rule editor works on a detached draft. Editing the draft does not rebuild or mutate the live trie. An explicit **Apply** action validates the entire configuration, writes it atomically, then rebuilds the trie. This keeps configuration work completely outside the normal typing hot path.
+The in-app rule editor works on a detached draft. Editing the draft does not rebuild or mutate the live trie. An explicit **Save & activate** action validates the entire active ruleset, writes the complete configuration atomically, then rebuilds the trie. This keeps configuration work completely outside the normal typing hot path.
 
 The config also persists whether the starter set is enabled. Turning starter rules off gives the user a blank expansion language without deleting their custom rules.
 
 Expansion configuration supports multiple named rulesets, but exactly one set is active. The active set alone is compiled into the reversed trie. Set creation, deletion, switching, validation, persistence, and trie rebuilds occur only through explicit rule-window actions; none of that work enters ordinary typing. Legacy flat `expansions.tsv` files are parsed as a single ruleset named `default` and migrate naturally when next saved.
 
-Per-ruleset compression telemetry is runtime-only and intentionally cheap: counters are updated only after a successful trie match. Ordinary keystrokes that do not expand pay no ruleset-statistics work. The counters measure hits, trigger characters, produced replacement characters, and derived avoided characters; they are experimental feedback, not durable user data.
+Per-ruleset compression telemetry is runtime-only and intentionally cheap: counters are updated only after a successful trie match. Ordinary keystrokes that do not expand pay no ruleset-statistics work. The counters measure hits, trigger characters, produced replacement characters, derived avoided characters, and typed/output percentage. The rules window exposes all configured sets in one comparison grid, including zero-hit baselines. These are experimental feedback, not durable user data.
 
 ## 4. Measurement
 
