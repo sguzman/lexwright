@@ -1185,28 +1185,42 @@ impl eframe::App for LexwrightApp {
         let editor_size = ui.available_size();
         let editor_width = editor_size.x.max(1.0);
 
-        // Harper is deliberately NOT part of this LayoutJob. Structure/morphology may
-        // color glyphs, but Harper only paints after text geometry is already final.
-        let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-            decorated_galley(
-                ui,
-                buffer.as_str(),
-                wrap_width,
-                lexical_spans.as_deref(),
-                morph_spans.as_deref(),
-            )
+        // The normal writing path is the stock egui TextEdit layouter. Harper is
+        // post-paint only, so enabling Harper cannot replace or perturb text layout.
+        //
+        // Structure/morphology require colored glyph sections, so only those explicit
+        // visual modes opt into our custom layouter.
+        let output = if lexical_spans.is_none() && morph_spans.is_none() {
+            egui::TextEdit::multiline(&mut self.buffer)
+                .font(egui::TextStyle::Monospace)
+                .desired_width(editor_width)
+                .min_size(editor_size)
+                .lock_focus(true)
+                .hint_text("Write.")
+                .id(editor_id)
+                .show(ui)
+        } else {
+            let mut layouter =
+                |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+                    decorated_galley(
+                        ui,
+                        buffer.as_str(),
+                        wrap_width,
+                        lexical_spans.as_deref(),
+                        morph_spans.as_deref(),
+                    )
+                };
+
+            egui::TextEdit::multiline(&mut self.buffer)
+                .font(egui::TextStyle::Monospace)
+                .desired_width(editor_width)
+                .min_size(editor_size)
+                .lock_focus(true)
+                .hint_text("Write.")
+                .id(editor_id)
+                .layouter(&mut layouter)
+                .show(ui)
         };
-
-        let editor = egui::TextEdit::multiline(&mut self.buffer)
-            .font(egui::TextStyle::Monospace)
-            .desired_width(editor_width)
-            .min_size(editor_size)
-            .lock_focus(true)
-            .hint_text("Write.")
-            .id(editor_id)
-            .layouter(&mut layouter);
-
-        let output = editor.show(ui);
         let response = &output.response;
 
         // TextEdit has already mutated EditorBuffer at this point. Consume those exact
@@ -1254,21 +1268,25 @@ fn decorated_galley(
     morph_spans: Option<&[MorphSpan]>,
 ) -> Arc<egui::Galley> {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let default_color = ui.visuals().text_color();
-    let mut job = egui::text::LayoutJob::default();
+    let text_color = ui
+        .visuals()
+        .override_text_color
+        .unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
+    let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
+    let line_height = row_height + ui.spacing().extra_text_line_spacing;
 
-    // Wrapping is a permanent editor invariant. The callback's wrap_width is derived
-    // from the TextEdit's current viewport width, and every visual state uses this same
-    // geometry path. Colors/underlines may change; line breaks may not.
-    job.wrap.max_width = wrap_width.max(1.0);
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+    job.keep_trailing_whitespace = true;
 
     if text.is_empty() {
         job.append(
-            text,
+            "",
             0.0,
             egui::TextFormat {
                 font_id,
-                color: default_color,
+                color: text_color,
+                line_height: Some(line_height),
                 ..Default::default()
             },
         );
@@ -1320,7 +1338,7 @@ fn decorated_galley(
                         .map(|span| lexical_color(span.class))
                 })
             })
-            .unwrap_or(default_color);
+            .unwrap_or(text_color);
 
         job.append(
             &text[start..end],
@@ -1328,6 +1346,7 @@ fn decorated_galley(
             egui::TextFormat {
                 font_id: font_id.clone(),
                 color,
+                line_height: Some(line_height),
                 ..Default::default()
             },
         );
