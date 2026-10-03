@@ -1086,7 +1086,9 @@ impl LexwrightApp {
     }
 
     fn show_morphology_status(&mut self, ui: &mut egui::Ui) {
-        let current = self.document.analysis_latest
+        let current = self
+            .document
+            .analysis_latest
             .as_ref()
             .filter(|analysis| analysis.revision == self.document.revision);
 
@@ -1122,7 +1124,9 @@ impl LexwrightApp {
     }
 
     fn show_lexeme_status(&mut self, ui: &mut egui::Ui) {
-        let current = self.document.analysis_latest
+        let current = self
+            .document
+            .analysis_latest
             .as_ref()
             .filter(|analysis| analysis.revision == self.document.revision);
 
@@ -1709,7 +1713,8 @@ impl eframe::App for LexwrightApp {
         };
 
         let morph_spans = if self.morphology_overlay {
-            self.document.analysis_latest
+            self.document
+                .analysis_latest
                 .as_ref()
                 .filter(|analysis| analysis.revision == self.document.revision)
                 .map(|analysis| Arc::clone(&analysis.morph_spans))
