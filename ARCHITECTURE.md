@@ -77,6 +77,8 @@ The config also persists whether the starter set is enabled. Turning starter rul
 
 Expansion configuration supports multiple named rulesets, but exactly one set is active. The active set alone is compiled into the reversed trie. Set creation, deletion, switching, validation, persistence, and trie rebuilds occur only through explicit rule-window actions; none of that work enters ordinary typing. Legacy flat `expansions.tsv` files are parsed as a single ruleset named `default` and migrate naturally when next saved.
 
+Per-ruleset compression telemetry is runtime-only and intentionally cheap: counters are updated only after a successful trie match. Ordinary keystrokes that do not expand pay no ruleset-statistics work. The counters measure hits, trigger characters, produced replacement characters, and derived avoided characters; they are experimental feedback, not durable user data.
+
 ## 4. Measurement
 
 Lexwright now records lightweight timing metrics for the actual code it controls:

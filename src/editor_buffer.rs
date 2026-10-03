@@ -23,11 +23,33 @@ pub struct IndexStats {
     pub utf8_fallback: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExpansionSessionStats {
+    pub hits: u64,
+    pub trigger_chars: u64,
+    pub output_chars: u64,
+}
+
+impl ExpansionSessionStats {
+    pub fn avoided_chars(self) -> u64 {
+        self.output_chars.saturating_sub(self.trigger_chars)
+    }
+
+    pub fn typed_percent(self) -> f64 {
+        if self.output_chars == 0 {
+            0.0
+        } else {
+            self.trigger_chars as f64 * 100.0 / self.output_chars as f64
+        }
+    }
+}
+
 pub struct EditorBuffer {
     text: String,
     ascii_only: bool,
     expansions: ExpansionEngine,
     expansions_applied: u64,
+    expansion_stats: Vec<(String, ExpansionSessionStats)>,
     insert_timing: TimingMetric,
     expansion_lookup_timing: TimingMetric,
     index_stats: IndexStats,
@@ -43,6 +65,7 @@ impl EditorBuffer {
             ascii_only,
             expansions: ExpansionEngine::load_default(),
             expansions_applied: 0,
+            expansion_stats: Vec::new(),
             insert_timing: TimingMetric::default(),
             expansion_lookup_timing: TimingMetric::default(),
             index_stats: IndexStats::default(),
@@ -124,6 +147,14 @@ impl EditorBuffer {
 
     pub fn expansion_hits(&self) -> u64 {
         self.expansions_applied
+    }
+
+    pub fn active_expansion_stats(&self) -> ExpansionSessionStats {
+        let active = self.expansions.active_set_name();
+        self.expansion_stats
+            .iter()
+            .find(|(name, _)| name == active)
+            .map_or_else(ExpansionSessionStats::default, |(_, stats)| *stats)
     }
 
     pub fn expansion_config_path(&self) -> &std::path::Path {
@@ -215,17 +246,43 @@ impl EditorBuffer {
             self.ascii_only = false;
         }
 
+        let expansion_start = hit.start_byte;
+        let trigger_chars = hit.trigger_chars;
+        let replacement_bytes = hit.replacement.len();
+        let replacement_chars = hit.replacement_chars;
+
         self.text
-            .replace_range(hit.start_byte..boundary_byte, hit.replacement);
+            .replace_range(expansion_start..boundary_byte, hit.replacement);
         self.expansions_applied = self.expansions_applied.saturating_add(1);
+
+        let active_set = self.expansions.active_set_name();
+        if let Some((_, stats)) = self
+            .expansion_stats
+            .iter_mut()
+            .find(|(name, _)| name == active_set)
+        {
+            stats.hits = stats.hits.saturating_add(1);
+            stats.trigger_chars = stats.trigger_chars.saturating_add(trigger_chars as u64);
+            stats.output_chars = stats.output_chars.saturating_add(replacement_chars as u64);
+        } else {
+            self.expansion_stats.push((
+                active_set.to_owned(),
+                ExpansionSessionStats {
+                    hits: 1,
+                    trigger_chars: trigger_chars as u64,
+                    output_chars: replacement_chars as u64,
+                },
+            ));
+        }
+
         self.expansion_lookup_timing.observe(lookup_elapsed);
 
         Some((
             cursor_advance,
-            hit.start_byte,
-            hit.trigger_chars,
-            hit.replacement.len(),
-            hit.replacement_chars,
+            expansion_start,
+            trigger_chars,
+            replacement_bytes,
+            replacement_chars,
         ))
     }
 }
@@ -348,6 +405,22 @@ mod tests {
 
         assert_eq!(buffer.text(), "because ");
         assert_eq!(buffer.expansion_hits(), 1);
+    }
+
+    #[test]
+    fn expansion_tracks_current_ruleset_compression_stats() {
+        let mut buffer = EditorBuffer::new(String::new());
+
+        buffer.insert_text("b", CharIndex(0));
+        buffer.insert_text("c", CharIndex(1));
+        buffer.insert_text(" ", CharIndex(2));
+
+        let stats = buffer.active_expansion_stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.trigger_chars, 2);
+        assert_eq!(stats.output_chars, 7);
+        assert_eq!(stats.avoided_chars(), 5);
+        assert!((stats.typed_percent() - 28.571).abs() < 0.01);
     }
 
     #[test]

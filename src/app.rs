@@ -491,9 +491,15 @@ impl LexwrightApp {
             format!("expand off · {} rules", self.buffer.expansion_rule_count())
         };
 
+        let stats = self.buffer.active_expansion_stats();
         let response = ui.selectable_label(enabled, label).on_hover_text(format!(
-            "Click to toggle. Active ruleset: {:?}\nConfig: {}",
+            "Click to toggle.\nActive ruleset: {:?}\nSession hits: {}\nExpanded-word chars typed/output: {}/{} ({:.1}% typed)\nCharacters avoided: {}\nConfig: {}",
             self.buffer.expansion_active_set_name(),
+            stats.hits,
+            stats.trigger_chars,
+            stats.output_chars,
+            stats.typed_percent(),
+            stats.avoided_chars(),
             self.buffer.expansion_config_path().display()
         ));
 
@@ -677,15 +683,18 @@ impl LexwrightApp {
                         revert = true;
                     }
 
+                    let stats = self.buffer.active_expansion_stats();
                     ui.weak(format!(
-                        "{:?} · {} draft user rules · starter rules {}",
+                        "{:?} · {} draft user rules · starter {} · session {} hits / {} chars avoided",
                         self.rule_editor.active_set,
                         self.rule_editor.rules.len(),
                         if self.rule_editor.starter_enabled {
                             "on"
                         } else {
                             "off"
-                        }
+                        },
+                        stats.hits,
+                        stats.avoided_chars(),
                     ));
                 });
 
