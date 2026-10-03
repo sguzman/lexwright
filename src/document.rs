@@ -1,10 +1,10 @@
-use std::{sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use crate::{
     analysis::{AnalysisWorker, TextAnalysis},
     editor_buffer::EditorBuffer,
     harper::{HarperDiagnostic, HarperResult, HarperWorker},
-    storage::LedgerStore,
+    storage::{LedgerStore, default_ledger_path},
 };
 
 /// State that belongs to one durable Lexwright document.
@@ -47,7 +47,11 @@ pub(crate) struct PendingExternalEdit {
 
 impl DocumentState {
     pub(crate) fn load_default() -> Self {
-        let store = LedgerStore::default();
+        Self::load_path(default_ledger_path())
+    }
+
+    pub(crate) fn load_path(path: PathBuf) -> Self {
+        let store = LedgerStore::new(path);
         let path_label = store.path().display().to_string();
         let (text, save_error) = match store.load() {
             Ok(text) => (text, None),
