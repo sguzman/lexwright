@@ -1198,7 +1198,7 @@ impl eframe::App for LexwrightApp {
                 if !language_overlay_active {
                     egui::TextEdit::multiline(&mut self.buffer)
                         .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
+                        .desired_width(ui.available_width())
                         .lock_focus(true)
                         .hint_text("Write.")
                         .id(editor_id)
@@ -1217,7 +1217,7 @@ impl eframe::App for LexwrightApp {
 
                     egui::TextEdit::multiline(&mut self.buffer)
                         .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
+                        .desired_width(ui.available_width())
                         .lock_focus(true)
                         .hint_text("Write.")
                         .id(editor_id)
