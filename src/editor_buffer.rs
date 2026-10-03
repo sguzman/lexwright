@@ -200,8 +200,11 @@ impl EditorBuffer {
         starter_enabled: bool,
         user_rules: Vec<ExpansionRule>,
     ) -> Result<(), String> {
+        let active = self.expansions.active_set_name().to_owned();
         self.expansions
-            .apply_active_set(starter_enabled, user_rules)
+            .apply_active_set(starter_enabled, user_rules)?;
+        self.expansion_stats.retain(|(name, _)| name != &active);
+        Ok(())
     }
 
     pub fn select_expansion_set(&mut self, name: &str) -> Result<(), String> {
@@ -209,11 +212,20 @@ impl EditorBuffer {
     }
 
     pub fn create_expansion_set_from_active(&mut self, name: &str) -> Result<(), String> {
-        self.expansions.create_set_from_active(name)
+        self.expansions.create_set_from_active(name)?;
+        self.expansion_stats.retain(|(candidate, _)| candidate != name);
+        Ok(())
     }
 
     pub fn delete_active_expansion_set(&mut self) -> Result<String, String> {
-        self.expansions.delete_active_set()
+        let removed = self.expansions.delete_active_set()?;
+        self.expansion_stats.retain(|(name, _)| name != &removed);
+        Ok(removed)
+    }
+
+    pub fn reset_active_expansion_stats(&mut self) {
+        let active = self.expansions.active_set_name().to_owned();
+        self.expansion_stats.retain(|(name, _)| name != &active);
     }
 
     fn byte_index_for_char(&mut self, char_index: egui::text::CharIndex) -> usize {
@@ -419,6 +431,21 @@ mod tests {
 
         assert_eq!(buffer.text(), "because ");
         assert_eq!(buffer.expansion_hits(), 1);
+    }
+
+    #[test]
+    fn saving_active_rules_resets_that_rulesets_session_stats() {
+        let mut buffer = EditorBuffer::new(String::new());
+
+        buffer.insert_text("b", CharIndex(0));
+        buffer.insert_text("c", CharIndex(1));
+        buffer.insert_text(" ", CharIndex(2));
+        assert_eq!(buffer.active_expansion_stats().hits, 1);
+
+        buffer
+            .apply_expansion_config(true, Vec::new())
+            .expect("save failed");
+        assert_eq!(buffer.active_expansion_stats().hits, 0);
     }
 
     #[test]
