@@ -50,7 +50,8 @@ The instrument now has:
 - an optional prefix/stem/suffix morphology overlay
 - conservative lexeme candidates with spelling-alternation rules
 - a lexeme-inspection window
-- one immutable snapshot shared by autosave and analysis
+- opt-in Harper spelling/grammar diagnostics with structured suggestions
+- one immutable snapshot shared by persistence and active analyzers
 - no linguistic analyzer on the input path
 
 The expansion matcher is compiled into a reversed trie. Typing an activation character such as a space or punctuation only walks backward through a possible trigger; it does not regex-scan or rescan the document.
@@ -153,6 +154,27 @@ Like the structure overlay, morphology and lexeme derivation are computed on the
 
 
 
+
+## Harper diagnostics
+
+Lexwright pins **harper-core 2.11.0** behind a dedicated `lexwright-harper` worker.
+
+Harper is **off by default**. Merely opening Lexwright does not initialize its dictionary and normal ledger typing does not send Harper snapshots. Click **harper off** to open its panel and explicitly enable background diagnostics.
+
+Once enabled, the same immutable snapshot fans out independently:
+
+```text
+Arc<str>
+  |-> atomic save worker
+  |-> fast structure/morphology worker
+  |-> Harper grammar/spelling worker
+```
+
+The Harper dictionary and curated American-English linter are initialized lazily on the worker after the first request. They never run on the process-start -> first-frame path.
+
+The diagnostics window preserves each issue's exact source span, Harper category, message, priority, and structured replacement/insertion/removal suggestions. Suggestions are **observational in this milestone**: they are shown but cannot yet rewrite the ledger. Applying a suggestion is a canonical editor mutation and will only be added once it can participate in cursor and undo semantics cleanly.
+
+Harper results are revision-tagged and queued stale snapshots are collapsed before the next grammar pass. A slow Harper pass therefore cannot block typing or delay the lightweight structure/morphology analyzer.
 
 ## Repeatable latency probe
 

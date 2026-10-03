@@ -78,6 +78,7 @@ pub struct LexwrightApp {
     morphology_overlay: bool,
     lexeme_window: bool,
     harper_worker: HarperWorker,
+    harper_enabled: bool,
     harper_latest: Option<HarperResult>,
     harper_pending_revision: Option<u64>,
     harper_error: Option<String>,
@@ -103,16 +104,15 @@ impl LexwrightApp {
         let initial_snapshot = Arc::<str>::from(text.as_str());
 
         let (analysis_pending_revision, analysis_error) =
-            match analysis_worker.queue(0, Arc::clone(&initial_snapshot)) {
+            match analysis_worker.queue(0, initial_snapshot) {
                 Ok(()) => (Some(0), None),
                 Err(error) => (None, Some(error)),
             };
 
-        let (harper_pending_revision, harper_error) =
-            match harper_worker.queue(0, initial_snapshot) {
-                Ok(()) => (Some(0), None),
-                Err(error) => (None, Some(error)),
-            };
+        // Harper is intentionally lazy. Merely opening Lexwright must not initialize
+        // its dictionary or compete with the first interactive frame.
+        let harper_pending_revision = None;
+        let harper_error = None;
 
         Self {
             buffer: EditorBuffer::new(text),
@@ -134,6 +134,7 @@ impl LexwrightApp {
             morphology_overlay: false,
             lexeme_window: false,
             harper_worker,
+            harper_enabled: false,
             harper_latest: None,
             harper_pending_revision,
             harper_error,
@@ -205,14 +206,16 @@ impl LexwrightApp {
             }
         }
 
-        match self.harper_worker.queue(revision, snapshot) {
-            Ok(()) => {
-                self.harper_pending_revision = Some(revision);
-                self.harper_error = None;
-            }
-            Err(error) => {
-                self.harper_pending_revision = None;
-                self.harper_error = Some(error);
+        if self.harper_enabled {
+            match self.harper_worker.queue(revision, snapshot) {
+                Ok(()) => {
+                    self.harper_pending_revision = Some(revision);
+                    self.harper_error = None;
+                }
+                Err(error) => {
+                    self.harper_pending_revision = None;
+                    self.harper_error = Some(error);
+                }
             }
         }
     }
@@ -237,8 +240,35 @@ impl LexwrightApp {
     }
 
 
+
+    fn queue_harper_current(&mut self) {
+        if !self.harper_enabled
+            || self
+                .harper_pending_revision
+                .is_some_and(|pending| pending >= self.revision)
+        {
+            return;
+        }
+
+        let snapshot = Arc::<str>::from(self.buffer.text());
+        match self.harper_worker.queue(self.revision, snapshot) {
+            Ok(()) => {
+                self.harper_pending_revision = Some(self.revision);
+                self.harper_error = None;
+            }
+            Err(error) => {
+                self.harper_pending_revision = None;
+                self.harper_error = Some(error);
+            }
+        }
+    }
+
     fn poll_harper(&mut self) {
         while let Some(result) = self.harper_worker.poll() {
+            if !self.harper_enabled {
+                continue;
+            }
+
             let should_store = self
                 .harper_latest
                 .as_ref()
@@ -678,29 +708,30 @@ impl LexwrightApp {
 
 
     fn show_harper_status(&mut self, ui: &mut egui::Ui) {
-        if let Some(error) = &self.harper_error {
-            if ui
-                .small_button("harper error")
-                .on_hover_text(error)
-                .clicked()
-            {
-                self.harper_window = !self.harper_window;
-            }
-            return;
-        }
-
-        let current = self
+        let label = if !self.harper_enabled {
+            "harper off".to_owned()
+        } else if let Some(result) = self
             .harper_latest
             .as_ref()
-            .filter(|result| result.revision == self.revision);
-
-        let label = if let Some(result) = current {
+            .filter(|result| result.revision == self.revision)
+        {
             format!("harper {}", result.diagnostics.len())
-        } else {
+        } else if self.harper_pending_revision.is_some() {
             "harper …".to_owned()
+        } else {
+            "harper on".to_owned()
         };
 
-        let tooltip = if let Some(result) = current {
+        let tooltip = if let Some(error) = &self.harper_error {
+            format!("Harper error: {error}\nClick to open diagnostics/settings.")
+        } else if !self.harper_enabled {
+            "Harper is disabled and consumes no analysis work. Click to open diagnostics/settings."
+                .to_owned()
+        } else if let Some(result) = self
+            .harper_latest
+            .as_ref()
+            .filter(|result| result.revision == self.revision)
+        {
             format!(
                 "Harper 2.11.0 · American English\nrevision: {}\ndiagnostics: {}{}\nHarper CPU: {}\n\nRuns on a separate background worker. Click to inspect suggestions.",
                 result.revision,
@@ -709,7 +740,8 @@ impl LexwrightApp {
                 format_ns(result.elapsed.as_nanos().min(u64::MAX as u128) as u64),
             )
         } else {
-            "Harper is analyzing a background snapshot. Click to open diagnostics.".to_owned()
+            "Harper is waiting for the current revision. Click to open diagnostics/settings."
+                .to_owned()
         };
 
         if ui.small_button(label).on_hover_text(tooltip).clicked() {
@@ -729,10 +761,31 @@ impl LexwrightApp {
             .default_width(680.0)
             .resizable(true)
             .show(ctx, |ui| {
+                let was_enabled = self.harper_enabled;
+                ui.checkbox(
+                    &mut self.harper_enabled,
+                    "Enable background Harper diagnostics",
+                )
+                .on_hover_text(
+                    "When disabled, Lexwright does not initialize Harper or send it document snapshots.",
+                );
+
+                if self.harper_enabled && !was_enabled {
+                    self.queue_harper_current();
+                } else if !self.harper_enabled && was_enabled {
+                    self.harper_pending_revision = None;
+                    self.harper_error = None;
+                }
+
                 ui.weak(
-                    "Harper suggestions are observational for now. Nothing in this window rewrites the ledger.",
+                    "Suggestions are observational for now. Nothing in this window rewrites the ledger.",
                 );
                 ui.add_space(6.0);
+
+                if !self.harper_enabled {
+                    ui.weak("Harper is off.");
+                    return;
+                }
 
                 let Some(result) = self
                     .harper_latest

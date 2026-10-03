@@ -97,9 +97,11 @@ Instrumentation itself must remain cheap. The timing structure is fixed-size and
 
 The analysis lane is now live.
 
-After the same 160 ms idle boundary used for persistence, Lexwright creates one immutable `Arc<str>` snapshot. The save worker and analysis worker receive shared references to that snapshot. The analyzer runs on its own named thread and returns a revision-tagged result.
+After the same 160 ms idle boundary used for persistence, Lexwright creates one immutable `Arc<str>` snapshot. Persistence and each enabled analyzer receive shared references to that same allocation. The lightweight structure/morphology analyzer runs continuously; heavier analyzers may be opt-in.
 
-If analysis falls behind, queued jobs are collapsed to the newest waiting revision before the next pass. Stale work is observationally useless and must never become backpressure on typing.
+If an analyzer falls behind, its queued jobs are collapsed independently to the newest waiting revision before the next pass. Stale work is observationally useless and must never become backpressure on typing.
+
+Harper is deliberately isolated on its own worker and disabled by default. Its dictionary and curated linter are constructed lazily only after the user enables Harper or explicitly requests a pass. Dictionary-backed grammar work therefore cannot extend startup latency, block typing, or delay word counts, structure spans, or morphology.
 
 The analyzer now reports mechanical counts plus revision-tagged lexical spans. Closed-class English words can be classified directly from small explicit lexicons. Open-class guesses are intentionally named `*-like` because the first pass uses conservative lexical/suffix heuristics rather than pretending to be a statistical POS tagger.
 
@@ -152,6 +154,6 @@ The editor is the load-bearing system. Everything else is optional machinery aro
 
 Keep the core dependency graph small.
 
-A dependency belongs on the editor hot path only if its value clearly exceeds its latency, binary-size, startup, and maintenance cost. Heavy NLP libraries should live behind optional modules or worker boundaries.
+A dependency belongs on the editor hot path only if its value clearly exceeds its latency, binary-size, startup, and maintenance cost. Heavy NLP libraries should live behind optional modules or worker boundaries. `harper-core` is the first concrete example: the dependency is pinned, its default optional feature set is disabled, and its runtime engine is owned entirely by an opt-in background worker.
 
 The initial renderer is `glow`, selected intentionally to keep the native stack smaller than the default wgpu path. eframe/egui remain replaceable implementation choices; the editor and linguistic model should not become inseparable from GUI widgets.

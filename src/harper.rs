@@ -86,20 +86,24 @@ impl HarperWorker {
 }
 
 fn harper_worker(job_rx: Receiver<HarperJob>, result_tx: Sender<HarperResult>) {
-    // Harper is intentionally initialized inside its own worker thread. Dictionary
-    // construction must never extend Lexwright's process-start -> first-frame path.
+    // Stay completely cold until Lexwright actually asks for a Harper pass.
+    let Ok(mut job) = job_rx.recv() else {
+        return;
+    };
+
+    while let Ok(newer) = job_rx.try_recv() {
+        job = newer;
+    }
+
+    // Dictionary construction happens only after the first request and entirely
+    // on this worker, never on the process-start -> first-frame path.
     let parser = PlainEnglish;
-    let mut linter = LintGroup::new_curated(FstDictionary::curated(), Dialect::American);
+    let dictionary = FstDictionary::curated();
+    let mut linter = LintGroup::new_curated(dictionary.clone(), Dialect::American);
 
-    while let Ok(mut job) = job_rx.recv() {
-        // Grammar work is observational. Drop queued stale snapshots before beginning
-        // another potentially expensive lint pass.
-        while let Ok(newer) = job_rx.try_recv() {
-            job = newer;
-        }
-
+    loop {
         let started = Instant::now();
-        let document = Document::new_curated(job.text.as_ref(), &parser);
+        let document = Document::new(job.text.as_ref(), &parser, dictionary.as_ref());
         let lints = linter.lint(&document);
         let total = lints.len();
         let byte_offsets = char_to_byte_offsets(&job.text);
@@ -145,7 +149,16 @@ fn harper_worker(job_rx: Receiver<HarperJob>, result_tx: Sender<HarperResult>) {
         };
 
         if result_tx.send(result).is_err() {
-            break;
+            return;
+        }
+
+        let Ok(next) = job_rx.recv() else {
+            return;
+        };
+        job = next;
+
+        while let Ok(newer) = job_rx.try_recv() {
+            job = newer;
         }
     }
 }
