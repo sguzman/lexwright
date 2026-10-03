@@ -105,7 +105,7 @@ Harper is deliberately isolated on its own worker and disabled by default. Its d
 
 The analyzer now reports mechanical counts plus revision-tagged lexical spans. Closed-class English words can be classified directly from small explicit lexicons. Open-class guesses are intentionally named `*-like` because the first pass uses conservative lexical/suffix heuristics rather than pretending to be a statistical POS tagger.
 
-A single decoration layouter composes already-computed structure colors, morphology colors, and Harper underlines only when their analysis revision exactly matches the live document revision. Classification never happens in the layouter. The decorated path remains inactive unless a visual analyzer is enabled, and it explicitly keeps wrapping disabled to match the stock TextEdit path. This prevents analyzer state transitions from changing line breaks or causing Space-key reflow jitter.
+A single editor layouter is installed permanently and composes already-computed structure colors, morphology colors, and Harper underlines only when their analysis revision exactly matches the live document revision. Classification never happens in the layouter. The same callback handles plain text and decorated text, and always wraps to the TextEdit viewport width. Analyzer state therefore changes paint only; it cannot switch layout implementations, disable wrapping, or move line breaks merely because a background result became current.
 
 Future systems plug into the same worker boundary:
 

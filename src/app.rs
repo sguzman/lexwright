@@ -1074,41 +1074,31 @@ impl eframe::App for LexwrightApp {
             None
         };
 
-        // Keep one stable decoration path while any visual analyzer is enabled.
-        // Critically, decorated_galley preserves TextEdit's no-wrap semantics.
-        let decorations_active =
-            self.structure_overlay || self.morphology_overlay || self.harper_enabled;
+        // The editor ALWAYS uses the same layouter. Analyzer state may change paint
+        // attributes, but it must never switch the text geometry implementation.
+        let editor_size = ui.available_size();
+        let editor_width = editor_size.x.max(1.0);
 
-        let response = if decorations_active {
-            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _wrap_width: f32| {
-                decorated_galley(
-                    ui,
-                    buffer.as_str(),
-                    lexical_spans.as_deref(),
-                    morph_spans.as_deref(),
-                    harper_diagnostics.as_deref(),
-                )
-            };
-
-            let editor = egui::TextEdit::multiline(&mut self.buffer)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(f32::INFINITY)
-                .lock_focus(true)
-                .hint_text("Write.")
-                .id(editor_id)
-                .layouter(&mut layouter);
-
-            ui.add_sized(ui.available_size(), editor)
-        } else {
-            let editor = egui::TextEdit::multiline(&mut self.buffer)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(f32::INFINITY)
-                .lock_focus(true)
-                .hint_text("Write.")
-                .id(editor_id);
-
-            ui.add_sized(ui.available_size(), editor)
+        let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+            decorated_galley(
+                ui,
+                buffer.as_str(),
+                wrap_width,
+                lexical_spans.as_deref(),
+                morph_spans.as_deref(),
+                harper_diagnostics.as_deref(),
+            )
         };
+
+        let editor = egui::TextEdit::multiline(&mut self.buffer)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(editor_width)
+            .lock_focus(true)
+            .hint_text("Write.")
+            .id(editor_id)
+            .layouter(&mut layouter);
+
+        let response = ui.add_sized(editor_size, editor);
 
         if self.focus_editor {
             response.request_focus();
@@ -1131,6 +1121,7 @@ impl eframe::App for LexwrightApp {
 fn decorated_galley(
     ui: &egui::Ui,
     text: &str,
+    wrap_width: f32,
     lexical_spans: Option<&[LexicalSpan]>,
     morph_spans: Option<&[MorphSpan]>,
     harper_diagnostics: Option<&[HarperDiagnostic]>,
@@ -1139,10 +1130,10 @@ fn decorated_galley(
     let default_color = ui.visuals().text_color();
     let mut job = egui::text::LayoutJob::default();
 
-    // TextEdit::desired_width(INFINITY) disables automatic word wrapping. The old
-    // custom layouters accidentally overwrote that with the viewport width, causing
-    // words to jump between rows whenever decorated text was active.
-    job.wrap.max_width = f32::INFINITY;
+    // Wrapping is a permanent editor invariant. The callback's wrap_width is derived
+    // from the TextEdit's current viewport width, and every visual state uses this same
+    // geometry path. Colors/underlines may change; line breaks may not.
+    job.wrap.max_width = wrap_width.max(1.0);
 
     if text.is_empty() {
         job.append(

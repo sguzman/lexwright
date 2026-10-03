@@ -129,7 +129,7 @@ Unclassified words remain the normal text color. Hover **structure on/off** for 
 
 This is scaffolding for the real system, not a claim that suffixes solve part-of-speech tagging. The useful achievement is that revision-tagged linguistic spans can now flow from the background analyzer into the live editor without the classifier entering the typing path.
 
-The overlay is **off by default**. egui invokes a custom TextEdit layouter at least once per frame, so Lexwright does not pay that rendering cost unless a visual analyzer is enabled. The decoration layouter preserves the editor's normal no-wrap behavior; enabling structure, morphology, or Harper must not change where words break.
+Lexwright now uses one custom TextEdit layouter in every visual state. Wrapping is a permanent editor invariant: text wraps to the current editor viewport width whether structure, morphology, Harper, or none of them are active. Analyzer updates may change color and underline, but they are not allowed to change text geometry or line-break behavior.
 
 
 ## Morphology overlay
