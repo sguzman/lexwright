@@ -188,6 +188,7 @@ impl LexwrightApp {
         while let Some(result) = self.analysis_worker.poll() {
             let should_store = self
                 .analysis_latest
+                .as_ref()
                 .is_none_or(|previous| result.revision >= previous.revision);
 
             if should_store {
@@ -427,7 +428,7 @@ impl LexwrightApp {
             return;
         }
 
-        let Some(analysis) = self.analysis_latest else {
+        let Some(analysis) = self.analysis_latest.as_ref() else {
             ui.weak("words …");
             return;
         };
