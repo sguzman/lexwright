@@ -1190,7 +1190,9 @@ impl eframe::App for LexwrightApp {
         //
         // Structure/morphology require colored glyph sections, so only those explicit
         // visual modes opt into our custom layouter.
-        let output = if lexical_spans.is_none() && morph_spans.is_none() {
+        let language_overlay_active = self.structure_overlay || self.morphology_overlay;
+
+        let output = if !language_overlay_active {
             egui::TextEdit::multiline(&mut self.buffer)
                 .font(egui::TextStyle::Monospace)
                 .desired_width(editor_width)
