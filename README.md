@@ -144,9 +144,9 @@ un | help | ful | ness
 
 The three visual roles are **prefix**, **stem**, and **suffix**. Hover the morph control for counts of decomposed words, prefixes, and suffixes.
 
-The colored morphology remains explicitly **surface/orthographic morphology**. A separate observational lexeme layer now derives conservative candidates from that surface segmentation. Initial normalization rules include `happi + ness -> happy`, `runn + ing -> run`, and `believ + able -> believe`. The surface bytes remain canonical and are never rewritten by this analysis.
+The colored morphology remains explicitly **surface/orthographic morphology**. A separate observational lexeme layer now derives conservative candidates from that surface segmentation. Affixes are no longer accepted merely because their letters match the edge of a word: stripping must leave a positively supported base or participate in a supported stacked-affix pattern. Initial normalization rules include `happi + ness -> happy`, `runn + ing -> run`, `probab + ly -> probable`, and `believ + able -> believe`. The surface bytes remain canonical and are never rewritten by this analysis.
 
-Click **lexemes N** in the top bar to inspect the current candidates, their surface stems, and the rule used. Obvious false suffix words such as `something`, `nothing`, `everything`, and `anything` are excluded from the morphology pass.
+Click **lexemes N** in the top bar to inspect the current candidates, their surface stems, and the rule used. Obvious false suffix words such as `something`, `nothing`, `everything`, and `anything` are excluded from the morphology pass. Prefixes are also evidence-gated, which prevents accidental analyses such as `really -> re + ally` or `decisions -> de + cision + s`.
 
 Like the structure overlay, morphology and lexeme derivation are computed on the background analysis worker and exposed only when their revision exactly matches the current ledger.
 

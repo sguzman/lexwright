@@ -381,13 +381,50 @@ fn analyze_morphology(
         "ic", "s",
     ];
 
+    let mut suffix_cursor = word.len();
+    let mut suffix_ranges = Vec::new();
+
+    for _ in 0..2 {
+        let remaining = &word[..suffix_cursor];
+        let Some(suffix) = SUFFIXES
+            .iter()
+            .copied()
+            .find(|suffix| suffix_is_supported(remaining, suffix))
+        else {
+            break;
+        };
+
+        let start = suffix_cursor - suffix.len();
+        suffix_ranges.push((start, suffix_cursor));
+        suffix_cursor = start;
+
+        // Once an inflectional ending is removed, do not immediately reinterpret the
+        // resulting lexical base as another derivation. This is what previously turned
+        // "decisions" into "ci + sion + s".
+        if matches!(suffix, "s" | "ed" | "ing" | "er" | "est") {
+            break;
+        }
+    }
+
+    let nearest_suffix = suffix_ranges
+        .last()
+        .map(|(start, end)| &word[*start..*end]);
+
     let mut prefix_cursor = 0;
     let mut prefix_ranges = Vec::new();
 
     for _ in 0..2 {
-        let remaining = &word[prefix_cursor..];
+        let remaining = &word[prefix_cursor..suffix_cursor];
         let Some(prefix) = PREFIXES.iter().copied().find(|prefix| {
-            remaining.len() >= prefix.len() + 3 && starts_with_ascii_case(remaining, prefix)
+            if remaining.len() < prefix.len() + 3
+                || !starts_with_ascii_case(remaining, prefix)
+            {
+                return false;
+            }
+
+            let candidate = &remaining[prefix.len()..];
+            let (normalized, _) = normalize_lexeme(candidate, nearest_suffix);
+            is_known_morph_base(&normalized)
         }) else {
             break;
         };
@@ -395,30 +432,6 @@ fn analyze_morphology(
         let end = prefix_cursor + prefix.len();
         prefix_ranges.push((prefix_cursor, end));
         prefix_cursor = end;
-    }
-
-    let mut suffix_cursor = word.len();
-    let mut suffix_ranges = Vec::new();
-
-    for _ in 0..2 {
-        let remaining = &word[prefix_cursor..suffix_cursor];
-        let Some(suffix) = SUFFIXES.iter().copied().find(|suffix| {
-            if *suffix == "s"
-                && (remaining.len() < 5
-                    || any_eq(remaining, &["this", "his", "is", "was", "has", "us", "yes"])
-                    || remaining.ends_with("ss"))
-            {
-                return false;
-            }
-
-            remaining.len() >= suffix.len() + 3 && ends_with_ascii_case(remaining, suffix)
-        }) else {
-            break;
-        };
-
-        let start = suffix_cursor - suffix.len();
-        suffix_ranges.push((start, suffix_cursor));
-        suffix_cursor = start;
     }
 
     if prefix_ranges.is_empty() && suffix_ranges.is_empty() {
@@ -429,13 +442,16 @@ fn analyze_morphology(
         return;
     }
 
-    counts.decomposed_words = counts.decomposed_words.saturating_add(1);
-
-    let nearest_suffix = suffix_ranges
-        .last()
-        .map(|(start, end)| &word[*start..*end]);
     let surface_stem = &word[prefix_cursor..suffix_cursor];
     let (lexeme, rule) = normalize_lexeme(surface_stem, nearest_suffix);
+
+    if !is_known_morph_base(&lexeme)
+        && !surface_stem_has_productive_shape(surface_stem, nearest_suffix)
+    {
+        return;
+    }
+
+    counts.decomposed_words = counts.decomposed_words.saturating_add(1);
 
     lexemes.push(LexemeCandidate {
         word_start: absolute_start,
@@ -472,6 +488,100 @@ fn analyze_morphology(
     }
 }
 
+fn suffix_is_supported(word: &str, suffix: &str) -> bool {
+    if word.len() < suffix.len() + 3 || !ends_with_ascii_case(word, suffix) {
+        return false;
+    }
+
+    let stem = &word[..word.len() - suffix.len()];
+
+    match suffix {
+        "s" => {
+            if any_eq(word, &["this", "his", "is", "was", "has", "us", "yes"])
+                || word.ends_with("ss")
+            {
+                return false;
+            }
+
+            is_known_morph_base(stem)
+                || any_suffix(
+                    stem,
+                    &[
+                        "tion", "sion", "ment", "ness", "ity", "ship", "ism", "ist", "ance",
+                        "ence", "hood", "dom",
+                    ],
+                )
+        }
+        "ing" | "ed" => {
+            let (normalized, _) = normalize_lexeme(stem, Some(suffix));
+            is_known_morph_base(&normalized)
+        }
+        "er" | "est" => {
+            let (normalized, _) = normalize_lexeme(stem, Some(suffix));
+            is_known_morph_base(&normalized)
+        }
+        "ly" => {
+            let (normalized, _) = normalize_lexeme(stem, Some(suffix));
+            is_known_morph_base(&normalized)
+        }
+        "able" | "ible" => {
+            let candidate = base_after_one_supported_prefix(stem, Some(suffix));
+            is_known_morph_base(&candidate)
+        }
+        "ness" => {
+            let candidate = base_after_one_supported_prefix(stem, Some(suffix));
+            is_known_morph_base(&candidate)
+                || any_suffix(stem, &["ful", "less", "ous", "ive", "al", "able", "ible", "ic"])
+        }
+        "ful" | "less" => {
+            let candidate = base_after_one_supported_prefix(stem, Some(suffix));
+            is_known_morph_base(&candidate)
+        }
+        "tion" | "sion" | "ment" | "ance" | "ence" | "hood" | "ship" | "ism" | "ist"
+        | "ity" | "al" | "ic" | "ous" | "ive" | "ize" | "ise" | "ify" | "ization"
+        | "isation" | "ability" | "ibility" | "ically" | "ingly" | "edly" => {
+            let candidate = base_after_one_supported_prefix(stem, Some(suffix));
+            is_known_morph_base(&candidate)
+        }
+        _ => false,
+    }
+}
+
+fn base_after_one_supported_prefix(stem: &str, suffix: Option<&str>) -> String {
+    const PREFIXES: &[&str] = &[
+        "counter", "under", "inter", "trans", "super", "over", "anti", "auto", "post", "pre",
+        "sub", "non", "dis", "mis", "un", "re", "de", "en", "em",
+    ];
+
+    let (normalized, _) = normalize_lexeme(stem, suffix);
+    if is_known_morph_base(&normalized) {
+        return normalized;
+    }
+
+    for prefix in PREFIXES {
+        if stem.len() < prefix.len() + 3 || !starts_with_ascii_case(stem, prefix) {
+            continue;
+        }
+
+        let candidate = &stem[prefix.len()..];
+        let (normalized, _) = normalize_lexeme(candidate, suffix);
+        if is_known_morph_base(&normalized) {
+            return normalized;
+        }
+    }
+
+    normalized
+}
+
+fn surface_stem_has_productive_shape(stem: &str, suffix: Option<&str>) -> bool {
+    let Some(suffix) = suffix else {
+        return false;
+    };
+
+    matches!(suffix, "ness" | "ful" | "less" | "able" | "ible")
+        && stem.len() >= 4
+}
+
 fn normalize_lexeme(stem: &str, nearest_suffix: Option<&str>) -> (String, LexemeRule) {
     let Some(suffix) = nearest_suffix else {
         return (stem.to_owned(), LexemeRule::SurfaceStem);
@@ -480,7 +590,9 @@ fn normalize_lexeme(stem: &str, nearest_suffix: Option<&str>) -> (String, Lexeme
     if matches!(suffix, "ness" | "ly") && stem.len() >= 2 && stem.ends_with('i') {
         let mut lexeme = stem[..stem.len() - 1].to_owned();
         lexeme.push('y');
-        return (lexeme, LexemeRule::IToY);
+        if is_known_morph_base(&lexeme) {
+            return (lexeme, LexemeRule::IToY);
+        }
     }
 
     if matches!(suffix, "ing" | "ed" | "er" | "est") {
@@ -494,17 +606,41 @@ fn normalize_lexeme(stem: &str, nearest_suffix: Option<&str>) -> (String, Lexeme
         {
             let mut lexeme = stem.to_owned();
             lexeme.pop();
-            return (lexeme, LexemeRule::UndoubleFinalConsonant);
+            if is_known_morph_base(&lexeme) {
+                return (lexeme, LexemeRule::UndoubleFinalConsonant);
+            }
         }
     }
 
-    if suffix.eq_ignore_ascii_case("able") && stem.to_ascii_lowercase().ends_with("iev") {
+    if matches!(suffix, "able" | "ible" | "ly" | "ing" | "ed") {
         let mut lexeme = stem.to_owned();
         lexeme.push('e');
-        return (lexeme, LexemeRule::RestoreFinalE);
+        if is_known_morph_base(&lexeme) {
+            return (lexeme, LexemeRule::RestoreFinalE);
+        }
     }
 
     (stem.to_owned(), LexemeRule::SurfaceStem)
+}
+
+fn is_known_morph_base(word: &str) -> bool {
+    any_eq(
+        word,
+        &[
+            "able", "act", "appear", "ask", "bad", "be", "begin", "believe", "big", "bring",
+            "build", "buy", "call", "care", "change", "consider", "continue", "create", "cut",
+            "decide", "decision", "different", "die", "early", "expect", "fall", "feel", "find",
+            "follow", "give", "good", "great", "grow", "happen", "happy", "hear", "help", "high",
+            "hope", "include", "keep", "kind", "know", "large", "lead", "learn", "leave", "little",
+            "live", "look", "lose", "love", "make", "meet", "move", "need", "new", "old", "open",
+            "offer", "pay", "play", "probable", "provide", "public", "pull", "quick", "raise",
+            "reach", "read", "real", "remain", "remember", "report", "require", "run", "same",
+            "say", "see", "sell", "send", "serve", "set", "show", "sit", "small", "speak", "spend",
+            "stand", "start", "stay", "stop", "suggest", "take", "talk", "tell", "think", "try",
+            "turn", "understand", "use", "wait", "walk", "want", "watch", "win", "work", "write",
+            "young",
+        ],
+    )
 }
 
 fn starts_with_ascii_case(word: &str, prefix: &str) -> bool {
@@ -977,6 +1113,35 @@ mod tests {
         let result = analyze(3, "something nothing everything anything");
         assert!(result.morph_spans.is_empty());
         assert!(result.lexeme_candidates.is_empty());
+    }
+
+    #[test]
+    fn sample_words_keep_only_supported_morphology() {
+        let text = "really probably quickly reconsider unbelievable unhelpfulness decisions";
+        let result = analyze(4, text);
+
+        let candidates: Vec<_> = result
+            .lexeme_candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    &text[candidate.word_start..candidate.word_end],
+                    candidate.lexeme.as_ref(),
+                )
+            })
+            .collect();
+
+        assert!(candidates.contains(&("really", "real")));
+        assert!(candidates.contains(&("probably", "probable")));
+        assert!(candidates.contains(&("quickly", "quick")));
+        assert!(candidates.contains(&("reconsider", "consider")));
+        assert!(candidates.contains(&("unbelievable", "believe")));
+        assert!(candidates.contains(&("unhelpfulness", "help")));
+        assert!(candidates.contains(&("decisions", "decision")));
+
+        assert!(!candidates.iter().any(|(_, lexeme)| {
+            matches!(*lexeme, "ally" | "probab" | "consid" | "cision")
+        }));
     }
 
     #[test]

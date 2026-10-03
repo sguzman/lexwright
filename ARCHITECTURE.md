@@ -124,7 +124,9 @@ No analyzer owns the canonical text. No analyzer may synchronously mutate it.
 
 The same background pass now emits non-overlapping prefix/stem/suffix byte spans for words that match a deliberately conservative surface-affix inventory. Up to two prefix and two suffix layers can be represented.
 
-The colored spans remain orthographic segmentation: the middle span is a **surface stem**, not canonical text. A separate lexeme-candidate layer may normalize only when a conservative spelling rule applies. Initial rules handle `i -> y` before suffixes such as `-ness`, undoubling selected final consonants before inflectional suffixes, and restoring final `e` in narrowly recognized cases such as `believ + able`.
+The colored spans remain orthographic segmentation: the middle span is a **surface stem**, not canonical text. Affix recognition is evidence-gated: matching edge letters is insufficient. A candidate suffix must leave a supported lexical base or participate in a supported stacked derivation, and prefix stripping must likewise expose a supported base after relevant spelling normalization. This prevents accidental segmentations such as `re + ally`, `re + consid + er`, and `de + cision + s`.
+
+A separate lexeme-candidate layer may normalize only when a conservative spelling rule applies. Initial rules handle `i -> y` before suffixes such as `-ness`, undoubling selected final consonants before inflectional suffixes, and restoring final `e` when the restored form is a supported base.
 
 Each lexeme candidate stores both the original word/stem byte ranges and the derived string. This preserves provenance: the UI can show exactly which document bytes produced a candidate without rewriting or pretending those normalized bytes exist in the ledger.
 
