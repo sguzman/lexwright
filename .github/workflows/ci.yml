@@ -25,6 +25,18 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache Cargo build state
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
       # Compilation and tests run before style checks so a formatting diff
       # never hides a real build failure.
       - name: Check
