@@ -153,10 +153,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         fs::rename(&temp_path, path)?;
 
         #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            if let Ok(directory) = File::open(parent) {
-                let _ = directory.sync_all();
-            }
+        if let Some(parent) = path.parent()
+            && let Ok(directory) = File::open(parent)
+        {
+            let _ = directory.sync_all();
         }
 
         Ok(())

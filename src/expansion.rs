@@ -345,10 +345,10 @@ fn save_config(path: &Path, config: &ExpansionConfig) -> Result<(), String> {
         fs::rename(&temp_path, path)?;
 
         #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            if let Ok(directory) = File::open(parent) {
-                let _ = directory.sync_all();
-            }
+        if let Some(parent) = path.parent()
+            && let Ok(directory) = File::open(parent)
+        {
+            let _ = directory.sync_all();
         }
 
         Ok(())
