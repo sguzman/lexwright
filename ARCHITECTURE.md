@@ -263,7 +263,11 @@ This layer must remain small. Full Vim operators, registers, macros, command mod
 
 Tabs are the next larger editor-ergonomics feature, but they are not merely UI chrome.
 
-A real Lexwright tab must own a durable document identity plus the state currently modeled globally: canonical text/buffer, save generation, analysis generations, cursor state, and any document-specific observational state. Before tabs are implemented, those responsibilities must be factored into a per-document state object without changing the stable single-document typing path.
+The first required boundary now exists as `DocumentState`. The single-document UI still renders the same stock `TextEdit` over the same `EditorBuffer`, but the document-owned state has been factored away from application-global chrome/settings. One `DocumentState` now owns its canonical buffer, revision/save clocks, persistence worker, snapshot cache, analysis worker/results, Harper worker/results, live diagnostic revision, and pending document edit state.
+
+This refactor is intentionally behavior-preserving. It does not add tab labels, alternate editor widgets, or a second mutation path. Its purpose is to make the current ledger a real object that can later be multiplied.
+
+The durable storage path is the current document identity. When tab UI is added, each tab must have its own `DocumentState` and its own stable editor ID so cursor/undo state cannot bleed between documents. Inactive documents must retain independent save/analyzer generations, and switching away from an edited document must not strand unsaved text.
 
 Tabs must not be implemented as multiple labels that secretly share one global ledger.
 
