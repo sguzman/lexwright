@@ -1482,8 +1482,7 @@ impl LexwrightApp {
                     ctx.global_style_mut(|style| {
                         apply_cursor_style(style, &self.editor_settings);
                     });
-                    self.editor_settings_editor.status =
-                        Some("saved editor settings".to_owned());
+                    self.editor_settings_editor.status = Some("saved editor settings".to_owned());
                 }
                 Err(error) => {
                     self.editor_settings_error = Some(error.clone());
