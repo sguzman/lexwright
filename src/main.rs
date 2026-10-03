@@ -1,5 +1,6 @@
 mod analysis;
 mod app;
+mod document;
 mod editor_buffer;
 mod expansion;
 mod harper;
