@@ -31,6 +31,7 @@ pub struct ExpansionRule {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpansionSet {
     pub name: String,
+    pub note: String,
     pub starter_enabled: bool,
     pub user_rules: Vec<ExpansionRule>,
 }
@@ -39,6 +40,7 @@ impl ExpansionSet {
     fn empty(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            note: String::new(),
             starter_enabled: true,
             user_rules: Vec::new(),
         }
@@ -155,11 +157,13 @@ impl ExpansionEngine {
 
     pub fn apply_active_set(
         &mut self,
+        note: String,
         starter_enabled: bool,
         user_rules: Vec<ExpansionRule>,
     ) -> Result<(), String> {
         let mut next = self.config.clone();
         let active = next.active_mut();
+        active.note = note;
         active.starter_enabled = starter_enabled;
         active.user_rules = user_rules;
         self.commit_config(next)
@@ -190,11 +194,31 @@ impl ExpansionEngine {
         let mut next = self.config.clone();
         next.sets.push(ExpansionSet {
             name: name.to_owned(),
+            note: source.note,
             starter_enabled: source.starter_enabled,
             user_rules: source.user_rules,
         });
         next.active_set = name.to_owned();
         self.commit_config(next)
+    }
+
+    pub fn rename_active_set(&mut self, name: &str) -> Result<String, String> {
+        validate_set_name(name)?;
+
+        let previous = self.config.active_set.clone();
+        if previous == name {
+            return Ok(previous);
+        }
+
+        if self.config.sets.iter().any(|set| set.name == name) {
+            return Err(format!("ruleset {name:?} already exists"));
+        }
+
+        let mut next = self.config.clone();
+        next.active_mut().name = name.to_owned();
+        next.active_set = name.to_owned();
+        self.commit_config(next)?;
+        Ok(previous)
     }
 
     pub fn delete_active_set(&mut self) -> Result<String, String> {
@@ -347,6 +371,13 @@ fn validate_set_name(name: &str) -> Result<(), String> {
 
 fn validate_set(set: &ExpansionSet) -> Result<(), String> {
     validate_set_name(&set.name)?;
+
+    if has_tsv_control(&set.note) {
+        return Err(format!(
+            "ruleset {:?}: note cannot contain tabs or newlines",
+            set.name
+        ));
+    }
 
     let mut seen = HashSet::new();
 
@@ -522,6 +553,15 @@ fn parse_config(contents: &str, path: &Path) -> Result<ExpansionConfig, String> 
                 sets.push(ExpansionSet::empty(value));
                 current_set = Some(sets.len() - 1);
             }
+            "@note" => {
+                let Some(set_index) = current_set else {
+                    return Err(format!(
+                        "{}:{line_number}: @note must follow @set",
+                        path.display()
+                    ));
+                };
+                sets[set_index].note = value.to_owned();
+            }
             "@starter" => {
                 let Some(set_index) = current_set else {
                     return Err(format!(
@@ -597,6 +637,9 @@ fn save_config(path: &Path, config: &ExpansionConfig) -> Result<(), String> {
         contents.push('\n');
         contents.push_str("@set\t");
         contents.push_str(&set.name);
+        contents.push('\n');
+        contents.push_str("@note\t");
+        contents.push_str(&set.note);
         contents.push('\n');
         contents.push_str("@starter\t");
         contents.push_str(if set.starter_enabled {
@@ -679,6 +722,7 @@ mod tests {
                 .iter()
                 .map(|(name, rules)| ExpansionSet {
                     name: (*name).to_owned(),
+                    note: String::new(),
                     starter_enabled: false,
                     user_rules: rules
                         .iter()
@@ -741,6 +785,7 @@ mod tests {
                 active_set: DEFAULT_SET_NAME.to_owned(),
                 sets: vec![ExpansionSet {
                     name: DEFAULT_SET_NAME.to_owned(),
+                    note: String::new(),
                     starter_enabled: true,
                     user_rules: vec![ExpansionRule {
                         trigger: "bc".to_owned(),
@@ -773,13 +818,14 @@ mod tests {
     #[test]
     fn parses_named_rulesets_and_active_selection() {
         let config = parse_config(
-            "@active\tcompressed\n\n@set\tdefault\n@starter\ttrue\n\n@set\tcompressed\n@starter\tfalse\nbc\tbecause\n",
+            "@active\tcompressed\n\n@set\tdefault\n@note\tbaseline\n@starter\ttrue\n\n@set\tcompressed\n@note\tshort forms\n@starter\tfalse\nbc\tbecause\n",
             Path::new("sets.tsv"),
         )
         .expect("named config failed");
 
         assert_eq!(config.active_set, "compressed");
         assert_eq!(config.sets.len(), 2);
+        assert_eq!(config.active().note, "short forms");
         assert_eq!(config.active().user_rules[0].replacement, "because");
     }
 
