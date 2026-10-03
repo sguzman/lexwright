@@ -6,9 +6,7 @@ use std::{
 use eframe::egui;
 
 use crate::{
-    analysis::{
-        AnalysisWorker, LexicalClass, LexicalSpan, MorphClass, MorphSpan, TextAnalysis,
-    },
+    analysis::{AnalysisWorker, LexicalClass, LexicalSpan, MorphClass, MorphSpan, TextAnalysis},
     editor_buffer::EditorBuffer,
     expansion::ExpansionRule,
     metrics::TimingMetric,
@@ -404,10 +402,7 @@ impl LexwrightApp {
             let starter_enabled = self.rule_editor.starter_enabled;
             let rules = self.rule_editor.rules.clone();
 
-            match self
-                .buffer
-                .apply_expansion_config(starter_enabled, rules)
-            {
+            match self.buffer.apply_expansion_config(starter_enabled, rules) {
                 Ok(()) => {
                     self.rule_editor.status = Some(format!(
                         "saved and compiled {} active rules",
@@ -420,7 +415,6 @@ impl LexwrightApp {
             }
         }
     }
-
 
     fn show_analysis_status(&self, ui: &mut egui::Ui) {
         if let Some(error) = &self.analysis_error {
@@ -452,7 +446,6 @@ impl LexwrightApp {
             format_ns(analysis.elapsed.as_nanos().min(u64::MAX as u128) as u64),
         ));
     }
-
 
     fn show_structure_status(&mut self, ui: &mut egui::Ui) {
         let current = self
@@ -607,9 +600,7 @@ impl eframe::App for LexwrightApp {
         self.poll_analysis();
         self.maybe_autosave();
 
-        if self.queued_revision > self.saved_revision
-            || self.analysis_pending_revision.is_some()
-        {
+        if self.queued_revision > self.saved_revision || self.analysis_pending_revision.is_some() {
             ui.ctx().request_repaint_after(SAVE_STATUS_POLL);
         }
 
@@ -657,22 +648,21 @@ impl eframe::App for LexwrightApp {
 
         let response = if self.structure_overlay || self.morphology_overlay {
             let morphology_overlay = self.morphology_overlay;
-            let mut layouter =
-                |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
-                    let text = buffer.as_str();
+            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+                let text = buffer.as_str();
 
-                    if morphology_overlay {
-                        match morph_spans.as_deref() {
-                            Some(spans) => morphology_galley(ui, text, wrap_width, spans),
-                            None => plain_galley(ui, text, wrap_width),
-                        }
-                    } else {
-                        match lexical_spans.as_deref() {
-                            Some(spans) => lexical_galley(ui, text, wrap_width, spans),
-                            None => plain_galley(ui, text, wrap_width),
-                        }
+                if morphology_overlay {
+                    match morph_spans.as_deref() {
+                        Some(spans) => morphology_galley(ui, text, wrap_width, spans),
+                        None => plain_galley(ui, text, wrap_width),
                     }
-                };
+                } else {
+                    match lexical_spans.as_deref() {
+                        Some(spans) => lexical_galley(ui, text, wrap_width, spans),
+                        None => plain_galley(ui, text, wrap_width),
+                    }
+                }
+            };
 
             let editor = egui::TextEdit::multiline(&mut self.buffer)
                 .font(egui::TextStyle::Monospace)
@@ -710,12 +700,7 @@ impl eframe::App for LexwrightApp {
     }
 }
 
-
-fn plain_galley(
-    ui: &egui::Ui,
-    text: &str,
-    wrap_width: f32,
-) -> Arc<egui::Galley> {
+fn plain_galley(ui: &egui::Ui, text: &str, wrap_width: f32) -> Arc<egui::Galley> {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width;
@@ -782,7 +767,6 @@ fn lexical_galley(
 
     ui.fonts_mut(|fonts| fonts.layout_job(job))
 }
-
 
 fn morphology_galley(
     ui: &egui::Ui,

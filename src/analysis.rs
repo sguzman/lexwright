@@ -84,8 +84,7 @@ impl LexicalCounts {
     fn increment(&mut self, class: Option<LexicalClass>) {
         match class {
             Some(class) => {
-                self.classified[class.index()] =
-                    self.classified[class.index()].saturating_add(1);
+                self.classified[class.index()] = self.classified[class.index()].saturating_add(1);
             }
             None => {
                 self.unclassified = self.unclassified.saturating_add(1);
@@ -101,7 +100,6 @@ impl LexicalCounts {
         self.classified.iter().copied().sum()
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MorphClass {
@@ -215,8 +213,7 @@ fn analyze(revision: u64, text: &str) -> TextAnalysis {
         paragraphs += 1;
     }
 
-    let (words, lexical_counts, lexical_spans, morph_counts, morph_spans) =
-        analyze_words(text);
+    let (words, lexical_counts, lexical_spans, morph_counts, morph_spans) = analyze_words(text);
 
     TextAnalysis {
         revision,
@@ -289,17 +286,11 @@ fn analyze_words(
             spans.push(LexicalSpan { start, end, class });
         }
 
-        analyze_morphology(
-            token,
-            start,
-            &mut morph_counts,
-            &mut morph_spans,
-        );
+        analyze_morphology(token, start, &mut morph_counts, &mut morph_spans);
     }
 
     (words, counts, spans, morph_counts, morph_spans)
 }
-
 
 fn analyze_morphology(
     word: &str,
@@ -312,14 +303,14 @@ fn analyze_morphology(
     }
 
     const PREFIXES: &[&str] = &[
-        "counter", "under", "inter", "trans", "super", "over", "anti", "auto",
-        "post", "pre", "sub", "non", "dis", "mis", "un", "re", "de", "en", "em",
+        "counter", "under", "inter", "trans", "super", "over", "anti", "auto", "post", "pre",
+        "sub", "non", "dis", "mis", "un", "re", "de", "en", "em",
     ];
     const SUFFIXES: &[&str] = &[
-        "ization", "isation", "ability", "ibility", "ically", "ingly", "edly",
-        "tion", "sion", "ment", "ness", "ance", "ence", "hood",
-        "ship", "able", "ible", "less", "ful", "ous", "ive", "ize", "ise", "ify",
-        "ing", "est", "ed", "ly", "er", "ism", "ist", "ity", "al", "ic", "s",
+        "ization", "isation", "ability", "ibility", "ically", "ingly", "edly", "tion", "sion",
+        "ment", "ness", "ance", "ence", "hood", "ship", "able", "ible", "less", "ful", "ous",
+        "ive", "ize", "ise", "ify", "ing", "est", "ed", "ly", "er", "ism", "ist", "ity", "al",
+        "ic", "s",
     ];
 
     let mut prefix_cursor = 0;
@@ -328,8 +319,7 @@ fn analyze_morphology(
     for _ in 0..2 {
         let remaining = &word[prefix_cursor..];
         let Some(prefix) = PREFIXES.iter().copied().find(|prefix| {
-            remaining.len() >= prefix.len() + 3
-                && starts_with_ascii_case(remaining, prefix)
+            remaining.len() >= prefix.len() + 3 && starts_with_ascii_case(remaining, prefix)
         }) else {
             break;
         };
@@ -353,8 +343,7 @@ fn analyze_morphology(
                 return false;
             }
 
-            remaining.len() >= suffix.len() + 3
-                && ends_with_ascii_case(remaining, suffix)
+            remaining.len() >= suffix.len() + 3 && ends_with_ascii_case(remaining, suffix)
         }) else {
             break;
         };
@@ -401,13 +390,11 @@ fn analyze_morphology(
 }
 
 fn starts_with_ascii_case(word: &str, prefix: &str) -> bool {
-    word.len() >= prefix.len()
-        && word[..prefix.len()].eq_ignore_ascii_case(prefix)
+    word.len() >= prefix.len() && word[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 fn ends_with_ascii_case(word: &str, suffix: &str) -> bool {
-    word.len() >= suffix.len()
-        && word[word.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    word.len() >= suffix.len() && word[word.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 fn classify_word(word: &str) -> Option<LexicalClass> {
@@ -418,12 +405,50 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_eq(
         word,
         &[
-            "i", "me", "my", "mine", "myself", "we", "us", "our", "ours",
-            "ourselves", "you", "your", "yours", "yourself", "yourselves", "he",
-            "him", "his", "himself", "she", "her", "hers", "herself", "it", "its",
-            "itself", "they", "them", "their", "theirs", "themselves", "who", "whom",
-            "whose", "which", "what", "someone", "anyone", "everyone", "nobody",
-            "something", "anything", "everything", "nothing",
+            "i",
+            "me",
+            "my",
+            "mine",
+            "myself",
+            "we",
+            "us",
+            "our",
+            "ours",
+            "ourselves",
+            "you",
+            "your",
+            "yours",
+            "yourself",
+            "yourselves",
+            "he",
+            "him",
+            "his",
+            "himself",
+            "she",
+            "her",
+            "hers",
+            "herself",
+            "it",
+            "its",
+            "itself",
+            "they",
+            "them",
+            "their",
+            "theirs",
+            "themselves",
+            "who",
+            "whom",
+            "whose",
+            "which",
+            "what",
+            "someone",
+            "anyone",
+            "everyone",
+            "nobody",
+            "something",
+            "anything",
+            "everything",
+            "nothing",
         ],
     ) {
         return Some(LexicalClass::Pronoun);
@@ -432,9 +457,8 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_eq(
         word,
         &[
-            "a", "an", "the", "this", "that", "these", "those", "some", "any",
-            "each", "every", "either", "neither", "no", "enough", "much", "many",
-            "few", "several", "all", "both",
+            "a", "an", "the", "this", "that", "these", "those", "some", "any", "each", "every",
+            "either", "neither", "no", "enough", "much", "many", "few", "several", "all", "both",
         ],
     ) {
         return Some(LexicalClass::Determiner);
@@ -443,12 +467,53 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_eq(
         word,
         &[
-            "about", "above", "across", "after", "against", "along", "among", "around",
-            "at", "before", "behind", "below", "beneath", "beside", "between", "beyond",
-            "by", "despite", "down", "during", "except", "for", "from", "in", "inside",
-            "into", "near", "of", "off", "on", "onto", "out", "outside", "over",
-            "past", "through", "throughout", "to", "toward", "under", "underneath",
-            "until", "up", "upon", "with", "within", "without",
+            "about",
+            "above",
+            "across",
+            "after",
+            "against",
+            "along",
+            "among",
+            "around",
+            "at",
+            "before",
+            "behind",
+            "below",
+            "beneath",
+            "beside",
+            "between",
+            "beyond",
+            "by",
+            "despite",
+            "down",
+            "during",
+            "except",
+            "for",
+            "from",
+            "in",
+            "inside",
+            "into",
+            "near",
+            "of",
+            "off",
+            "on",
+            "onto",
+            "out",
+            "outside",
+            "over",
+            "past",
+            "through",
+            "throughout",
+            "to",
+            "toward",
+            "under",
+            "underneath",
+            "until",
+            "up",
+            "upon",
+            "with",
+            "within",
+            "without",
         ],
     ) {
         return Some(LexicalClass::Preposition);
@@ -457,8 +522,8 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_eq(
         word,
         &[
-            "and", "or", "but", "nor", "yet", "so", "although", "because", "since",
-            "unless", "while", "whereas", "if", "when", "whenever", "though",
+            "and", "or", "but", "nor", "yet", "so", "although", "because", "since", "unless",
+            "while", "whereas", "if", "when", "whenever", "though",
         ],
     ) {
         return Some(LexicalClass::Conjunction);
@@ -467,9 +532,9 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_eq(
         word,
         &[
-            "be", "am", "is", "are", "was", "were", "been", "being", "have", "has",
-            "had", "do", "does", "did", "can", "could", "may", "might", "must",
-            "shall", "should", "will", "would",
+            "be", "am", "is", "are", "was", "were", "been", "being", "have", "has", "had", "do",
+            "does", "did", "can", "could", "may", "might", "must", "shall", "should", "will",
+            "would",
         ],
     ) {
         return Some(LexicalClass::Auxiliary);
@@ -478,8 +543,22 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_eq(
         word,
         &[
-            "not", "very", "too", "also", "just", "only", "never", "always", "often",
-            "sometimes", "then", "now", "here", "there", "already", "still",
+            "not",
+            "very",
+            "too",
+            "also",
+            "just",
+            "only",
+            "never",
+            "always",
+            "often",
+            "sometimes",
+            "then",
+            "now",
+            "here",
+            "there",
+            "already",
+            "still",
         ],
     ) || any_suffix(word, &["ly"])
     {
@@ -489,8 +568,23 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_eq(
         word,
         &[
-            "good", "bad", "new", "old", "great", "little", "big", "high", "different",
-            "small", "large", "next", "early", "young", "important", "public", "same",
+            "good",
+            "bad",
+            "new",
+            "old",
+            "great",
+            "little",
+            "big",
+            "high",
+            "different",
+            "small",
+            "large",
+            "next",
+            "early",
+            "young",
+            "important",
+            "public",
+            "same",
             "able",
         ],
     ) || any_suffix(
@@ -505,21 +599,131 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_eq(
         word,
         &[
-            "say", "says", "said", "make", "makes", "made", "go", "goes", "went",
-            "gone", "get", "gets", "got", "know", "knows", "knew", "think", "thinks",
-            "thought", "take", "takes", "took", "see", "sees", "saw", "come", "comes",
-            "came", "want", "wants", "look", "looks", "use", "uses", "find", "found",
-            "give", "gave", "tell", "told", "work", "works", "call", "try", "ask",
-            "need", "feel", "felt", "become", "became", "leave", "left", "put", "keep",
-            "kept", "let", "begin", "began", "seem", "help", "talk", "turn", "start",
-            "show", "hear", "play", "run", "move", "live", "believe", "bring", "happen",
-            "write", "provide", "sit", "stand", "lose", "pay", "meet", "include",
-            "continue", "set", "learn", "change", "lead", "understand", "watch",
-            "follow", "stop", "create", "speak", "read", "allow", "add", "spend",
-            "grow", "open", "walk", "win", "offer", "remember", "love", "consider",
-            "appear", "buy", "wait", "serve", "die", "send", "expect", "build", "stay",
-            "fall", "cut", "reach", "kill", "remain", "suggest", "raise", "pass",
-            "sell", "require", "report", "decide", "pull",
+            "say",
+            "says",
+            "said",
+            "make",
+            "makes",
+            "made",
+            "go",
+            "goes",
+            "went",
+            "gone",
+            "get",
+            "gets",
+            "got",
+            "know",
+            "knows",
+            "knew",
+            "think",
+            "thinks",
+            "thought",
+            "take",
+            "takes",
+            "took",
+            "see",
+            "sees",
+            "saw",
+            "come",
+            "comes",
+            "came",
+            "want",
+            "wants",
+            "look",
+            "looks",
+            "use",
+            "uses",
+            "find",
+            "found",
+            "give",
+            "gave",
+            "tell",
+            "told",
+            "work",
+            "works",
+            "call",
+            "try",
+            "ask",
+            "need",
+            "feel",
+            "felt",
+            "become",
+            "became",
+            "leave",
+            "left",
+            "put",
+            "keep",
+            "kept",
+            "let",
+            "begin",
+            "began",
+            "seem",
+            "help",
+            "talk",
+            "turn",
+            "start",
+            "show",
+            "hear",
+            "play",
+            "run",
+            "move",
+            "live",
+            "believe",
+            "bring",
+            "happen",
+            "write",
+            "provide",
+            "sit",
+            "stand",
+            "lose",
+            "pay",
+            "meet",
+            "include",
+            "continue",
+            "set",
+            "learn",
+            "change",
+            "lead",
+            "understand",
+            "watch",
+            "follow",
+            "stop",
+            "create",
+            "speak",
+            "read",
+            "allow",
+            "add",
+            "spend",
+            "grow",
+            "open",
+            "walk",
+            "win",
+            "offer",
+            "remember",
+            "love",
+            "consider",
+            "appear",
+            "buy",
+            "wait",
+            "serve",
+            "die",
+            "send",
+            "expect",
+            "build",
+            "stay",
+            "fall",
+            "cut",
+            "reach",
+            "kill",
+            "remain",
+            "suggest",
+            "raise",
+            "pass",
+            "sell",
+            "require",
+            "report",
+            "decide",
+            "pull",
         ],
     ) || any_suffix(word, &["ing", "ed", "ize", "ise", "ify", "ate"])
     {
@@ -529,8 +733,8 @@ fn classify_word(word: &str) -> Option<LexicalClass> {
     if any_suffix(
         word,
         &[
-            "tion", "sion", "ment", "ness", "ity", "ship", "ism", "ist", "ance",
-            "ence", "hood", "dom",
+            "tion", "sion", "ment", "ness", "ity", "ship", "ism", "ist", "ance", "ence", "hood",
+            "dom",
         ],
     ) {
         return Some(LexicalClass::NounLike);
@@ -547,16 +751,13 @@ fn any_eq(word: &str, candidates: &[&str]) -> bool {
 
 fn any_suffix(word: &str, suffixes: &[&str]) -> bool {
     suffixes.iter().any(|suffix| {
-        word.len() >= suffix.len()
-            && word[word.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        word.len() >= suffix.len() && word[word.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LexicalClass, MorphClass, analyze, analyze_morphology, classify_word,
-    };
+    use super::{LexicalClass, MorphClass, analyze, analyze_morphology, classify_word};
 
     #[test]
     fn counts_basic_text_without_claiming_full_nlp() {
@@ -595,7 +796,6 @@ mod tests {
         assert_eq!(classify_word("happiness"), Some(LexicalClass::NounLike));
     }
 
-
     #[test]
     fn decomposes_multiple_affix_layers_without_claiming_lemmatization() {
         let mut counts = super::MorphCounts::default();
@@ -628,7 +828,12 @@ mod tests {
         let pieces: Vec<_> = result
             .morph_spans
             .iter()
-            .map(|span| (&"A very unhelpfulness example"[span.start..span.end], span.class))
+            .map(|span| {
+                (
+                    &"A very unhelpfulness example"[span.start..span.end],
+                    span.class,
+                )
+            })
             .collect();
 
         assert!(pieces.contains(&("un", MorphClass::Prefix)));

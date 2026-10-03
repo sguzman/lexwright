@@ -1,18 +1,10 @@
-use std::{
-    hint::black_box,
-    time::Instant,
-};
+use std::{hint::black_box, time::Instant};
 
 use eframe::egui::{TextBuffer, text::CharIndex};
 
 use crate::editor_buffer::EditorBuffer;
 
-const SIZES: &[usize] = &[
-    4 * 1024,
-    64 * 1024,
-    1024 * 1024,
-    8 * 1024 * 1024,
-];
+const SIZES: &[usize] = &[4 * 1024, 64 * 1024, 1024 * 1024, 8 * 1024 * 1024];
 
 pub fn run() {
     println!("Lexwright latency probe");
@@ -83,9 +75,7 @@ fn bench_edit_cycle(buffer: &mut EditorBuffer, char_index: usize, iterations: us
         total_ns = total_ns.saturating_add(started.elapsed().as_nanos());
         black_box(advance);
 
-        buffer.delete_char_range(
-            CharIndex(char_index)..CharIndex(char_index.saturating_add(1)),
-        );
+        buffer.delete_char_range(CharIndex(char_index)..CharIndex(char_index.saturating_add(1)));
     }
 
     average_ns(total_ns, iterations)
@@ -106,8 +96,7 @@ fn average_ns(total_ns: u128, iterations: usize) -> u64 {
         return 0;
     }
 
-    (total_ns / iterations as u128)
-        .min(u64::MAX as u128) as u64
+    (total_ns / iterations as u128).min(u64::MAX as u128) as u64
 }
 
 fn format_ns(nanos: u64) -> String {

@@ -34,8 +34,7 @@ impl TimingMetric {
             return 0;
         }
 
-        (self.total_ns / self.count as u128)
-            .min(u64::MAX as u128) as u64
+        (self.total_ns / self.count as u128).min(u64::MAX as u128) as u64
     }
 }
 

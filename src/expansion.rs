@@ -219,8 +219,7 @@ fn is_word_char(ch: char) -> bool {
 }
 
 fn has_tsv_control(text: &str) -> bool {
-    text.chars()
-        .any(|ch| matches!(ch, '\t' | '\n' | '\r'))
+    text.chars().any(|ch| matches!(ch, '\t' | '\n' | '\r'))
 }
 
 fn validate_config(config: &ExpansionConfig) -> Result<(), String> {
@@ -234,7 +233,9 @@ fn validate_config(config: &ExpansionConfig) -> Result<(), String> {
         }
 
         if has_tsv_control(&rule.trigger) {
-            return Err(format!("rule {line}: trigger cannot contain tabs or newlines"));
+            return Err(format!(
+                "rule {line}: trigger cannot contain tabs or newlines"
+            ));
         }
 
         if has_tsv_control(&rule.replacement) {
