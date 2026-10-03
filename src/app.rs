@@ -1268,10 +1268,12 @@ impl eframe::App for LexwrightApp {
 
         if should_trace {
             let (cursor_index, cursor_row, cursor_column) =
-                output.cursor_range.map_or((usize::MAX, usize::MAX, usize::MAX), |range| {
-                    let layout = output.galley.layout_from_cursor(range.primary);
-                    (range.primary.index.0, layout.row, layout.column.0)
-                });
+                output
+                    .cursor_range
+                    .map_or((usize::MAX, usize::MAX, usize::MAX), |range| {
+                        let layout = output.galley.layout_from_cursor(range.primary);
+                        (range.primary.index.0, layout.row, layout.column.0)
+                    });
 
             self.jitter_recorder.record(JitterFrame {
                 elapsed_us: self.metrics.process_started.elapsed().as_micros(),
@@ -1292,7 +1294,10 @@ impl eframe::App for LexwrightApp {
                 cursor_column,
                 queued_revision: self.queued_revision,
                 saved_revision: self.saved_revision,
-                analysis_revision: self.analysis_latest.as_ref().map(|analysis| analysis.revision),
+                analysis_revision: self
+                    .analysis_latest
+                    .as_ref()
+                    .map(|analysis| analysis.revision),
                 harper_revision: self.harper_latest.as_ref().map(|result| result.revision),
                 expansion_hits: self.buffer.expansion_hits(),
             });
