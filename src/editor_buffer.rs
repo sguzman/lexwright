@@ -181,6 +181,51 @@ impl EditorBuffer {
             .map_or_else(ExpansionSessionStats::default, |(_, _, stats)| *stats)
     }
 
+    pub fn expansion_session_report(&self) -> String {
+        let active = self.expansions.active_set_name();
+        let mut report = String::from("# Lexwright expansion session\n\n");
+        report.push_str(&format!("Active ruleset: `{active}`\n\n"));
+
+        let note = &self.expansions.active_set().note;
+        if !note.is_empty() {
+            report.push_str(&format!("Active note: {note}\n\n"));
+        }
+
+        report.push_str("## Ruleset comparison\n\n");
+        report.push_str("| ruleset | hits | typed chars | output chars | typed % | avoided |\n");
+        report.push_str("| --- | ---: | ---: | ---: | ---: | ---: |\n");
+
+        for (name, stats) in self.expansion_stats_by_set() {
+            report.push_str(&format!(
+                "| {}{} | {} | {} | {} | {:.1}% | {} |\n",
+                name,
+                if name == active { " (active)" } else { "" },
+                stats.hits,
+                stats.trigger_chars,
+                stats.output_chars,
+                stats.typed_percent(),
+                stats.avoided_chars(),
+            ));
+        }
+
+        report.push_str("\n## Active user rules\n\n");
+        report.push_str("| trigger | replacement | hits | avoided |\n");
+        report.push_str("| --- | --- | ---: | ---: |\n");
+
+        for rule in &self.expansions.active_set().user_rules {
+            let stats = self.active_expansion_rule_stats(&rule.trigger);
+            report.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                rule.trigger.replace('|', "\\|"),
+                rule.replacement.replace('|', "\\|"),
+                stats.hits,
+                stats.avoided_chars(),
+            ));
+        }
+
+        report
+    }
+
     pub fn expansion_config_path(&self) -> &std::path::Path {
         self.expansions.config_path()
     }
