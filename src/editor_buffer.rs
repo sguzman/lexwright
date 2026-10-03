@@ -227,8 +227,7 @@ impl EditorBuffer {
         self.expansions.create_set_from_active(name)?;
         self.expansion_stats
             .retain(|(candidate, _)| candidate != name);
-        self.expansion_rule_stats
-            .retain(|(set, _, _)| set != name);
+        self.expansion_rule_stats.retain(|(set, _, _)| set != name);
         Ok(())
     }
 
