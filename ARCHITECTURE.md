@@ -27,7 +27,7 @@ The hot path must not perform:
 - serialization
 - work proportional to the whole document merely because one key was pressed
 
-The current egui `String` editor is a bootstrap implementation, not the final buffer architecture. Before large-ledger performance becomes a problem, the editor layer should move behind a buffer abstraction suitable for incremental edits.
+The current egui-backed string storage is a bootstrap implementation, not the final large-document buffer architecture. Before large-ledger performance becomes a problem, the editor layer should move behind a buffer designed for incremental edits.
 
 ## 2. Persistence
 
@@ -45,9 +45,29 @@ Current policy:
 
 The UI thread never performs the disk write.
 
-The current snapshot operation still clones the `String` on the UI thread. That is acceptable only for the bootstrap. A future buffer/storage design must remove document-sized copying from routine editing.
+The current snapshot operation still clones the document string on the UI thread. That is acceptable only for the bootstrap. A future buffer/storage design must remove document-sized copying from routine editing.
 
-## 3. Analysis model
+## 3. Programmable input
+
+Text expansion is special because it intentionally changes canonical text while the user is typing, so it is the only linguistic layer currently allowed to run synchronously.
+
+Rules are compiled once at startup into a **reversed trie**. On an activation character such as a space or punctuation, matching walks backward from the insertion point only while a trie branch exists. It does not regex-scan or search the document.
+
+Current invariants:
+
+- no regex engine in the keystroke path
+- no heap allocation for a successful/failed suffix lookup
+- no full-document scan by the expansion matcher
+- expansion only activates on a single delimiter insertion
+- a trigger must start at a word boundary
+- the synchronous expansion layer only accepts replacements at least as long as their triggers, allowing the editor buffer to report the correct forward cursor advance immediately
+- shortening and arbitrary rewrites belong in a later transformation layer with explicit cursor/state handling
+
+Starter rules are compiled into the binary. User rules are loaded once at startup from `$XDG_CONFIG_HOME/lexwright/expansions.tsv` (or `~/.config/lexwright/expansions.tsv`) and override starter rules by trigger.
+
+The current egui `TextBuffer` contract still uses character indices over a UTF-8 `String`; converting an insertion position to a byte position inherits egui/String's existing indexing cost. The trie itself adds only bounded local work. Replacing the bootstrap string buffer is therefore still a planned latency milestone.
+
+## 4. Analysis model
 
 Future language systems consume versioned document snapshots or edit deltas.
 
@@ -66,22 +86,6 @@ The UI discards or visually marks stale results rather than blocking for a curre
 
 No analyzer owns the canonical text.
 
-## 4. Programmable input
-
-Text expansion is special because it intentionally changes the text while the user is typing.
-
-Therefore it may run synchronously only if its cost is tightly bounded by local context. Rules should be compiled into a structure that can answer from a small suffix/window around the cursor rather than rescanning the document.
-
-The intended rule classes are:
-
-- literal abbreviations
-- typo aliases
-- phrase expansions
-- regex/context rules
-- later: chords or other compressed-input experiments
-
-Every ruleset must be independently switchable and reversible at the configuration level.
-
 ## 5. Failure isolation
 
 If a future subsystem fails:
@@ -89,7 +93,7 @@ If a future subsystem fails:
 - grammar dies -> typing continues
 - POS tagger dies -> typing continues
 - morphology dies -> typing continues
-- expansion rule is invalid -> that rule is disabled; typing continues
+- an expansion config is invalid -> starter rules remain available and the error becomes visible
 - save fails -> typing continues and the failure becomes visible
 - network is unavailable -> core editing is unaffected
 
@@ -104,6 +108,7 @@ We should instrument at least:
 - process start -> first interactive frame
 - input event -> completed editor frame
 - editor-frame CPU time
+- expansion lookup duration / hit count
 - save snapshot enqueue cost
 - background save duration
 - analyzer turnaround by revision

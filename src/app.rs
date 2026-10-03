@@ -2,13 +2,16 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::storage::{LedgerStore, SaveEvent};
+use crate::{
+    editor_buffer::EditorBuffer,
+    storage::{LedgerStore, SaveEvent},
+};
 
 const AUTOSAVE_IDLE: Duration = Duration::from_millis(160);
 const SAVE_STATUS_POLL: Duration = Duration::from_millis(40);
 
 pub struct LexwrightApp {
-    text: String,
+    buffer: EditorBuffer,
     revision: u64,
     queued_revision: u64,
     saved_revision: u64,
@@ -34,7 +37,7 @@ impl LexwrightApp {
         };
 
         Self {
-            text,
+            buffer: EditorBuffer::new(text),
             revision: 0,
             queued_revision: 0,
             saved_revision: 0,
@@ -77,7 +80,7 @@ impl LexwrightApp {
         }
 
         let revision = self.revision;
-        match self.store.queue_save(revision, self.text.clone()) {
+        match self.store.queue_save(revision, self.buffer.text().to_owned()) {
             Ok(()) => {
                 self.queued_revision = revision;
             }
@@ -101,7 +104,7 @@ impl LexwrightApp {
         }
     }
 
-    fn show_status(&self, ui: &mut egui::Ui) {
+    fn show_save_status(&self, ui: &mut egui::Ui) {
         if let Some(error) = &self.save_error {
             ui.weak(format!("save error: {error}"));
         } else if self.saved_revision >= self.revision {
@@ -110,6 +113,34 @@ impl LexwrightApp {
             ui.weak("saving");
         } else {
             ui.weak("edited");
+        }
+    }
+
+    fn show_expansion_status(&mut self, ui: &mut egui::Ui) {
+        let enabled = self.buffer.expansions_enabled();
+        let label = if enabled {
+            format!(
+                "expand on · {} rules · {} hits",
+                self.buffer.expansion_rule_count(),
+                self.buffer.expansion_hits()
+            )
+        } else {
+            format!("expand off · {} rules", self.buffer.expansion_rule_count())
+        };
+
+        let response = ui.selectable_label(enabled, label).on_hover_text(format!(
+            "Click to toggle. User rules: {}",
+            self.buffer.expansion_config_path().display()
+        ));
+
+        if response.clicked() {
+            self.buffer.set_expansions_enabled(!enabled);
+            self.focus_editor = true;
+        }
+
+        if let Some(error) = self.buffer.expansion_config_error() {
+            ui.separator();
+            ui.weak("expansion config error").on_hover_text(error);
         }
     }
 }
@@ -127,7 +158,9 @@ impl eframe::App for LexwrightApp {
         ui.horizontal(|ui| {
             ui.strong("Lexwright");
             ui.separator();
-            self.show_status(ui);
+            self.show_save_status(ui);
+            ui.separator();
+            self.show_expansion_status(ui);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak(&self.path_label);
@@ -135,7 +168,7 @@ impl eframe::App for LexwrightApp {
         });
         ui.separator();
 
-        let editor = egui::TextEdit::multiline(&mut self.text)
+        let editor = egui::TextEdit::multiline(&mut self.buffer)
             .font(egui::TextStyle::Monospace)
             .desired_width(f32::INFINITY)
             .lock_focus(true)

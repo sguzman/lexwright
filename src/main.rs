@@ -1,4 +1,6 @@
 mod app;
+mod editor_buffer;
+mod expansion;
 mod storage;
 
 use app::LexwrightApp;
