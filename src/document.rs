@@ -4,7 +4,7 @@ use crate::{
     analysis::{AnalysisWorker, TextAnalysis},
     editor_buffer::EditorBuffer,
     harper::{HarperDiagnostic, HarperResult, HarperWorker},
-    storage::{LedgerStore, default_ledger_path},
+    storage::LedgerStore,
 };
 
 /// State that belongs to one durable Lexwright document.
@@ -46,10 +46,6 @@ pub(crate) struct PendingExternalEdit {
 }
 
 impl DocumentState {
-    pub(crate) fn load_default() -> Self {
-        Self::load_path(default_ledger_path())
-    }
-
     pub(crate) fn load_path(path: PathBuf) -> Self {
         let store = LedgerStore::new(path);
         let path_label = store.path().display().to_string();
