@@ -14,6 +14,7 @@ The first product is deliberately small: open Lexwright, type into a durable loc
 4. **Local first.** The core editor needs no service, account, telemetry, or network connection.
 5. **Experiments are reversible.** Abbreviation systems, spelling rules, grammar rules, morphology views, and future transformations should be independently switchable.
 6. **Measure latency.** Performance claims belong in measurements, not vibes.
+7. **Editor geometry is sacred too.** Status text, telemetry, analyzer freshness, save state, and other ancillary UI must never resize the writing surface.
 
 ## Intended layers
 
@@ -232,6 +233,31 @@ fwiw	for what it's worth
 `@starter false` disables the built-in starter set. User rules with the same trigger as a starter rule override it.
 
 The synchronous expansion layer still requires replacements to be at least as long as their triggers. Arbitrary shortening belongs in a later transformation layer because egui's current TextBuffer insertion contract only reports forward cursor advance cleanly.
+
+## Incident memory
+
+Severe editor failures are documented under [`docs/incidents/`](docs/incidents/README.md).
+
+The first major incident is intentionally preserved in detail: [2026-10-03 editor geometry jitter and EOF crash](docs/incidents/2026-10-03-editor-geometry-jitter.md).
+
+That incident established two non-negotiable engineering rules:
+
+- dynamic status UI must be geometrically isolated from the editor; a stable window must not acquire a different editor wrap width merely because a label changes
+- optimized editor fast paths must preserve the complete behavior of the stock implementation they replace, including EOF edge cases
+
+It also established a debugging rule: when the same load-bearing editor failure survives two targeted fixes, **instrument the failing quantity before making further speculative architecture changes**.
+
+The geometry recorder that resolved the incident remains available at:
+
+```text
+$XDG_STATE_HOME/lexwright/editor-trace.tsv
+```
+
+or:
+
+```text
+~/.local/state/lexwright/editor-trace.tsv
+```
 
 ## Run
 

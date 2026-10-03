@@ -174,3 +174,57 @@ Keep the core dependency graph small.
 A dependency belongs on the editor hot path only if its value clearly exceeds its latency, binary-size, startup, and maintenance cost. Heavy NLP libraries should live behind optional modules or worker boundaries. `harper-core` is the first concrete example: the dependency is pinned, its default optional feature set is disabled, and its runtime engine is owned entirely by an opt-in background worker.
 
 The initial renderer is `glow`, selected intentionally to keep the native stack smaller than the default wgpu path. eframe/egui remain replaceable implementation choices; the editor and linguistic model should not become inseparable from GUI widgets.
+
+
+## 8. Editor geometry isolation
+
+The editor rectangle and wrap width are load-bearing state.
+
+A severe 2026-10-03 incident demonstrated that dynamic top-bar text could expand egui's parent `Ui` and therefore change the editor width even though the application window had not changed size. Geometry tracing captured the editor oscillating from roughly 946 px to 982.5 px and back, forcing whole-document rewraps.
+
+Permanent invariants:
+
+- editor width is captured from stable container geometry before dynamic status surfaces are rendered
+- status, telemetry, save state, analyzer freshness, badges, errors, and notifications do not determine editor width
+- stale/current analysis state belongs in tooltips or geometry-stable controls rather than labels whose changing width can resize the writing surface
+- a stable application window implies a stable editor wrap width unless the user explicitly changes layout
+- any unexplained editor-width change during typing is a bug
+- Harper is post-paint only in normal writing mode and has no authority over text shaping or wrapping
+- structure/morphology custom layout must mirror the stock TextEdit geometry contract and must not switch layout implementation merely because an analysis result becomes stale/current
+
+The detailed postmortem is retained at `docs/incidents/2026-10-03-editor-geometry-jitter.md`.
+
+## 9. Optimization equivalence
+
+A fast path is allowed only when it preserves the complete behavioral contract of the path it replaces.
+
+The 2026-10-03 EOF crash was caused by an ASCII O(1) character-to-byte optimization returning the numeric character index directly. While the arithmetic is valid for ASCII, stock egui/String `TextBuffer` behavior also clamps transient one-past-EOF indices to `text.len()`. The optimized path omitted that semantic behavior and crashed in release mode.
+
+Permanent invariants:
+
+- optimizations must match upstream semantics, not only common-case values
+- safety must never depend on `debug_assert!`
+- EOF and one-past-EOF behavior must be tested explicitly when replacing editor indexing code
+- non-ASCII fallback behavior must remain covered
+- insert/delete/replace boundary tests are required for index fast paths
+- a performance optimization that weakens correctness is a failed optimization
+
+## 10. Severe-editor-bug debugging protocol
+
+The editor is load-bearing. Repeated speculative fixes are more damaging here than slower evidence gathering.
+
+Escalation policy:
+
+1. One clear reproduction may receive one narrow targeted fix.
+2. If that fix fails, reassess the hypothesis rather than layering another patch onto it.
+3. If the same externally visible editor failure survives a second targeted fix, instrument before changing architecture again.
+4. Record the physical quantity capable of producing the symptom:
+   - geometry/reflow -> editor rect, galley rect, wrap width, row count, cursor layout
+   - latency -> timings, queue depth, revision transitions
+   - corruption -> exact mutation deltas and revisions
+   - persistence -> snapshot/save generations
+5. CI success is not user-visible resolution.
+6. Do not call a severe interaction bug fixed until the original reproduction stops occurring.
+7. Keep a successful diagnostic recorder available through subsequent feature work.
+
+The editor geometry recorder writes edit-adjacent frames to `$XDG_STATE_HOME/lexwright/editor-trace.tsv` or `~/.local/state/lexwright/editor-trace.tsv`.
