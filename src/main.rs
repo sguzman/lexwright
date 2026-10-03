@@ -5,6 +5,7 @@ mod expansion;
 mod harper;
 mod jitter;
 mod metrics;
+mod navigation;
 mod probe;
 mod settings;
 mod storage;
