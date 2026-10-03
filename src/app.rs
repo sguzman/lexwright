@@ -863,8 +863,8 @@ impl LexwrightApp {
     }
 
     fn show_harper_status(&mut self, ui: &mut egui::Ui) {
-        let current_display = self.harper_enabled
-            && self.harper_display_revision == Some(self.revision);
+        let current_display =
+            self.harper_enabled && self.harper_display_revision == Some(self.revision);
 
         let label = if !self.harper_enabled {
             "harper off".to_owned()
@@ -890,7 +890,11 @@ impl LexwrightApp {
                 } else {
                     0
                 },
-                if result.truncated { " (source result capped)" } else { "" },
+                if result.truncated {
+                    " (source result capped)"
+                } else {
+                    ""
+                },
                 format_ns(result.elapsed.as_nanos().min(u64::MAX as u128) as u64),
                 result.linted_bytes,
                 result.total_bytes,
@@ -1174,13 +1178,12 @@ impl eframe::App for LexwrightApp {
             None
         };
 
-        let harper_diagnostics = if self.harper_enabled
-            && self.harper_display_revision == Some(self.revision)
-        {
-            Some(Arc::clone(&self.harper_display_diagnostics))
-        } else {
-            None
-        };
+        let harper_diagnostics =
+            if self.harper_enabled && self.harper_display_revision == Some(self.revision) {
+                Some(Arc::clone(&self.harper_display_diagnostics))
+            } else {
+                None
+            };
 
         let editor_size = ui.available_size();
         let editor_width = editor_size.x.max(1.0);
