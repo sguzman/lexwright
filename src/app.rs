@@ -14,6 +14,7 @@ use crate::{
     harper::{HarperDiagnostic, HarperResult, HarperSuggestion, HarperWorker},
     jitter::{JitterFrame, JitterRecorder},
     metrics::TimingMetric,
+    navigation::VimLite,
     settings::{self, EditorSettings},
     storage::{LedgerStore, SaveEvent},
 };
@@ -130,6 +131,7 @@ pub struct LexwrightApp {
     editor_settings_path: PathBuf,
     editor_settings_error: Option<String>,
     editor_settings_editor: EditorSettingsEditor,
+    vim_lite: VimLite,
 }
 
 impl LexwrightApp {
@@ -201,6 +203,7 @@ impl LexwrightApp {
             editor_settings_path,
             editor_settings_error,
             editor_settings_editor: EditorSettingsEditor::default(),
+            vim_lite: VimLite::default(),
         }
     }
 
@@ -1344,6 +1347,24 @@ impl LexwrightApp {
         }
     }
 
+    fn show_navigation_status(&mut self, ui: &mut egui::Ui) {
+        if !self.editor_settings.vim_lite {
+            return;
+        }
+
+        let mode = self.vim_lite.mode();
+        if ui
+            .small_button(mode.label())
+            .on_hover_text(
+                "Vim-lite navigation. Esc enters NAV; i returns to INSERT.\nNAV movement: h/j/k/l, w/b, 0/$, gg/G.\nNAV is non-mutating. Click to toggle mode.",
+            )
+            .clicked()
+        {
+            self.vim_lite.toggle_mode();
+            self.focus_editor = true;
+        }
+    }
+
     fn show_cursor_status(&mut self, ui: &mut egui::Ui) {
         let tooltip = if let Some(error) = &self.editor_settings_error {
             format!(
@@ -1478,6 +1499,9 @@ impl LexwrightApp {
             match settings::save(&self.editor_settings_path, &draft) {
                 Ok(()) => {
                     self.editor_settings = draft;
+                    if !self.editor_settings.vim_lite {
+                        self.vim_lite.reset();
+                    }
                     self.editor_settings_error = None;
                     ctx.global_style_mut(|style| {
                         apply_cursor_style(style, &self.editor_settings);
@@ -1610,6 +1634,10 @@ impl eframe::App for LexwrightApp {
             self.show_perf_status(ui);
             ui.separator();
             self.show_cursor_status(ui);
+            if self.editor_settings.vim_lite {
+                ui.separator();
+                self.show_navigation_status(ui);
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak("ledger").on_hover_text(&self.path_label);
@@ -1624,6 +1652,9 @@ impl eframe::App for LexwrightApp {
 
         let editor_id = egui::Id::new("lexwright-ledger-editor");
         self.apply_pending_external_edit(ui.ctx(), editor_id);
+        let nav_command =
+            self.vim_lite
+                .capture(ui, editor_id, self.editor_settings.vim_lite);
 
         let lexical_spans = if self.structure_overlay {
             self.analysis_latest
@@ -1694,6 +1725,15 @@ impl eframe::App for LexwrightApp {
         if response.changed() {
             self.mark_edited(ui.ctx());
         }
+
+        self.vim_lite.apply(
+            ui.ctx(),
+            editor_id,
+            &output.galley,
+            self.buffer.text(),
+            output.cursor_range,
+            nav_command,
+        );
 
         let harper_diagnostics =
             if self.harper_enabled && self.harper_display_revision == Some(self.revision) {
