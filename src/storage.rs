@@ -169,7 +169,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-fn default_ledger_path() -> PathBuf {
+pub(crate) fn default_ledger_path() -> PathBuf {
     if let Some(path) = nonempty_env("LEXWRIGHT_LEDGER") {
         return PathBuf::from(path);
     }
