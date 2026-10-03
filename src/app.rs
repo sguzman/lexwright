@@ -165,9 +165,13 @@ impl LexwrightApp {
     }
 
     fn mark_edited(&mut self, ctx: &egui::Context) {
+        let edits = self.buffer.take_edit_deltas();
+        if edits.is_empty() {
+            return;
+        }
+
         let previous_revision = self.revision;
         let next_revision = self.revision.wrapping_add(1);
-        let edits = self.buffer.take_edit_deltas();
 
         self.rebase_harper_display(previous_revision, next_revision, &edits);
 
