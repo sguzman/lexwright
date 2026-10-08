@@ -1,5 +1,19 @@
 # Lexwright architecture
 
+Lexwright's primary product is now a **disposable scratchpad with persistent expansion rules**. The former durable English editor, NLP instrumentation, and document subsystem remain available through the explicit `--editor` mode. Sections covering ledgers, tabs, diagnostics, and document analysis below describe **secondary editor infrastructure**; they do not describe the default scratch workflow.
+
+## Default scratch contract
+
+- Zero CLI arguments mean scratch **and** overlay; `--no-overlay` opts out of Hyprland floating dispatch.
+- Scratch starts with an empty `DocumentState::scratch()`. Its `LedgerStore::ephemeral` does not own a save worker, has no disk-load path, and rejects save requests.
+- Expansion rules/configuration are persistent independently of scratch text. The default scratch ruleset is `scratch`; the durable globally active workspace ruleset is not silently switched.
+- Harper is opt-in even in scratch; structure/morphology/inspection UI is not part of the default scratch bar.
+- **Unmodified Enter**, when the scratch editor has focus, copies the whole buffer with `wl-copy` and exits on successful handoff. **Shift+Enter** retains egui's multiline editing semantics. **Escape** closes without updating the clipboard. **Ctrl+J** remains a compatibility shortcut.
+- If clipboard handoff fails, keep the buffer and show an error. A successful handoff permits exit. Never persist scratch text in a recovery artifact.
+- The legacy editor is opened explicitly with `--editor`; `--tab NAME` implies editor mode for backward compatibility.
+- The global settings record stores **editor font size** and **interface font size** independently. Interface text styles include Body, Button, Small, Monospace, and Heading, so rules and settings inputs scale with labels. Native egui zoom remains a separate dimension.
+- Normal scratch chrome stays minimal: ephemeral indicator, copy action, expansion/rules control, appearance, and visible launch/copy errors.
+
 Lexwright is a writing instrument first and a language laboratory second.
 
 This document is intentionally opinionated. Features that violate these invariants should be redesigned rather than allowed to accrete latency into the editor.
@@ -35,9 +49,9 @@ If any non-ASCII text enters the document, Lexwright switches conservatively to 
 
 The contiguous String remains a bootstrap limitation: middle-of-document insertion still shifts trailing bytes. A real rope / piece table / gap-buffer architecture cannot be honestly obtained while stock egui `TextEdit` requires the whole document as a contiguous `&str`. The eventual large-document solution therefore includes a Lexwright-owned editor surface rather than repeatedly flattening a non-contiguous buffer.
 
-## 2. Persistence
+## 2. Persistence (explicit legacy editor mode)
 
-The ledger is user data, not disposable application state.
+In `--editor` mode, the ledger is durable user data. This section does **not** apply to scratch mode.
 
 Current policy:
 
@@ -299,13 +313,13 @@ CLI launch options are orchestration around the same ownership boundaries, not a
 
 Scratch mode owns an ephemeral `DocumentState` whose `LedgerStore` has no persistence worker. Ordinary edits still receive revisions, background lightweight analysis, Harper diagnostics, expansion matching, and editor undo state, but no document save can be queued. The application also skips workspace rendering and the shutdown flush path. Scratch therefore remains ephemeral even if future code accidentally reaches `LedgerStore::queue_save`: the store itself rejects the write.
 
-The scratch top bar must make the destructive lifecycle visually unmistakable. On Linux, scratch exit delegates clipboard ownership to the external `wl-copy` helper because Wayland clipboard data must continue to be served after the editor window disappears. **Ctrl+J** (or the fallback **Copy + Quit** control) pipes the complete buffer to `wl-copy` and waits only for the short-lived launcher process before marking Lexwright for close on the following UI frame. The background clipboard-owner process intentionally outlives Lexwright. Lexwright must not capture a pipe inherited by that background process and then call `wait_with_output()`, because EOF would be delayed until clipboard ownership ends and the UI would freeze. If spawning, writing to, or waiting for the launcher fails, the close is cancelled and the draft remains visible with an explicit copy error.
+The scratch top bar must make the disposable lifecycle visually unmistakable without exposing the full editor's language-analysis controls. On Linux, scratch exit delegates clipboard ownership to the external `wl-copy` helper because Wayland clipboard data must continue to be served after the editor window disappears. **Enter** when the scratch editor is focused (or the legacy **Ctrl+J** shortcut, or the **Copy + Quit** control) pipes the complete buffer to `wl-copy` and waits only for the short-lived launcher process before marking Lexwright for close on the following UI frame. The background clipboard-owner process intentionally outlives Lexwright. Lexwright must not capture a pipe inherited by that background process and then call `wait_with_output()`, because EOF would be delayed until clipboard ownership ends and the UI would freeze. If spawning, writing to, or waiting for the launcher fails, the close is cancelled and the draft remains visible with an explicit copy error.
 
 
 
 ### Font-size persistence
 
-Editor font size is a field of the existing `EditorSettings` record, not a separate scratch/workspace preference. The slider edits the live editor-font setting and persists it through the editor settings writer. Manual saving of the other editor-ergonomics draft explicitly preserves the already-live font-size value, preventing a stale draft from overwriting it. Both plain and decorated editor layout paths consume the same `editor_settings.font_size`.
+Editor font size and independent interface font size are fields of the existing `EditorSettings` record, not separate scratch/workspace preferences. The slider edits the live editor-font setting and persists it through the editor settings writer. Manual saving of the other editor-ergonomics draft explicitly preserves both already-live font-size values, preventing a stale draft from overwriting it. Both plain and decorated editor layout paths consume the same `editor_settings.font_size`.
 
 
 ### Cross-process editor-setting writes
