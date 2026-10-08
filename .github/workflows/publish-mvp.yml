@@ -1,0 +1,64 @@
+# One-time, idempotent publication of the accepted 0.1.0 MVP.
+# The source release is pinned to the already-validated preparation commit.
+name: Publish Lexwright MVP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-mvp.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-mvp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify accepted release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "21e1b556b41c5fa305a621fd7490e885f58c918e^{commit}"
+          git show 21e1b556b41c5fa305a621fd7490e885f58c918e:Cargo.toml | grep -Fx 'version = "0.1.0"'
+          git show 21e1b556b41c5fa305a621fd7490e885f58c918e:LICENSE >/dev/null
+          test -s docs/releases/v0.1.0.md
+
+      - name: Create immutable MVP version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=21e1b556b41c5fa305a621fd7490e885f58c918e
+          git fetch origin --tags
+          if git show-ref --verify --quiet refs/tags/v0.1.0; then
+            actual="$(git rev-parse 'refs/tags/v0.1.0^{commit}')"
+            if [ "$actual" != "$target" ]; then
+              echo "v0.1.0 already exists at a different commit; refusing to retag" >&2
+              exit 1
+            fi
+          else
+            git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -a v0.1.0 "$target" -m 'Lexwright v0.1.0 — accepted MVP'
+            git push origin refs/tags/v0.1.0
+          fi
+
+      - name: Publish GitHub release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v0.1.0 >/dev/null 2>&1; then
+            echo "v0.1.0 GitHub release already exists; leaving it unchanged"
+          else
+            gh release create v0.1.0 \
+              --verify-tag \
+              --title 'Lexwright v0.1.0 — MVP' \
+              --notes-file docs/releases/v0.1.0.md
+          fi
