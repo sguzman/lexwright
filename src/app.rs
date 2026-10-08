@@ -768,7 +768,8 @@ impl LexwrightApp {
 
         // Empty or whitespace-only scratch text is dismissal, never a clipboard
         // replacement. Do not invoke wl-copy at all for a blank buffer.
-        if scratch_submit_action(self.document.buffer.text()) == ScratchSubmitAction::CloseWithoutCopy {
+        let submit_action = scratch_submit_action(self.document.buffer.text());
+        if submit_action == ScratchSubmitAction::CloseWithoutCopy {
             self.scratch_copy_quit_pending = true;
             ctx.request_repaint();
             return;
@@ -2286,33 +2287,6 @@ fn scratch_submit_action(text: &str) -> ScratchSubmitAction {
     }
 }
 
-#[cfg(test)]
-mod scratch_submit_tests {
-    use super::{ScratchSubmitAction, scratch_submit_action};
-
-    #[test]
-    fn blank_scratch_never_needs_clipboard_handoff() {
-        for text in ["", " ", "  \t\n  ", "\r\n", "\u{2003}"] {
-            assert_eq!(
-                scratch_submit_action(text),
-                ScratchSubmitAction::CloseWithoutCopy,
-                "unexpected clipboard write for {text:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn nonblank_scratch_still_copies() {
-        for text in ["hello", " line\n", "0", "🙂", "  abc  "] {
-            assert_eq!(
-                scratch_submit_action(text),
-                ScratchSubmitAction::CopyAndClose,
-                "unexpected discard for {text:?}"
-            );
-        }
-    }
-}
-
 impl eframe::App for LexwrightApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
@@ -2916,5 +2890,32 @@ fn format_ns(nanos: u64) -> String {
         format!("{:.1} µs", nanos as f64 / 1_000.0)
     } else {
         format!("{:.2} ms", nanos as f64 / 1_000_000.0)
+    }
+}
+
+#[cfg(test)]
+mod scratch_submit_tests {
+    use super::{ScratchSubmitAction, scratch_submit_action};
+
+    #[test]
+    fn blank_scratch_never_needs_clipboard_handoff() {
+        for text in ["", " ", "  \t\n  ", "\r\n", "\u{2003}"] {
+            assert_eq!(
+                scratch_submit_action(text),
+                ScratchSubmitAction::CloseWithoutCopy,
+                "unexpected clipboard write for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nonblank_scratch_still_copies() {
+        for text in ["hello", " line\n", "0", "🙂", "  abc  "] {
+            assert_eq!(
+                scratch_submit_action(text),
+                ScratchSubmitAction::CopyAndClose,
+                "unexpected discard for {text:?}"
+            );
+        }
     }
 }
