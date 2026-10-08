@@ -22,12 +22,15 @@ pub(crate) fn maybe_launch_via_hyprland(launch: &LaunchOptions) -> Result<bool, 
 
     // hyprctl's exec dispatcher uses a shell. Quote each argument separately,
     // including the user-provided ruleset, to preserve literal semantics.
-    let command = std::iter::once(executable.to_string_lossy().into_owned())
+    let arguments = std::iter::once(executable.to_string_lossy().into_owned())
         .chain(env::args().skip(1))
         .chain(std::iter::once("--overlay-child".to_owned()))
         .map(|arg| shell_quote(&arg))
         .collect::<Vec<_>>()
         .join(" ");
+    // Keep the spawned PID equal to the window's PID for Hyprland's per-exec
+    // rule matching, even on shells which would otherwise fork.
+    let command = format!("exec {arguments}");
 
     // Modern Lua config and legacy hyprlang config use different dispatch APIs.
     let lua_dispatch = format!(
