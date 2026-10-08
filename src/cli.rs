@@ -199,7 +199,14 @@ mod tests {
             tab: Some("reply".to_owned()),
         };
         assert_eq!(
-            launch(&["--editor", "--tab", "reply", "--harper", "--ruleset", "aggressive"]),
+            launch(&[
+                "--editor",
+                "--tab",
+                "reply",
+                "--harper",
+                "--ruleset",
+                "aggressive"
+            ]),
             expected
         );
         assert_eq!(
@@ -242,6 +249,9 @@ mod tests {
         assert!(parse_args(["--scratch", "--help"]).is_err());
         assert!(parse_args(["--latency-probe", "--no-overlay"]).is_err());
         assert_eq!(parse_args(["--help"]).unwrap(), Command::Help);
-        assert_eq!(parse_args(["--latency-probe"]).unwrap(), Command::LatencyProbe);
+        assert_eq!(
+            parse_args(["--latency-probe"]).unwrap(),
+            Command::LatencyProbe
+        );
     }
 }

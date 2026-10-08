@@ -1984,7 +1984,11 @@ impl LexwrightApp {
             )
         };
 
-        if ui.small_button("appearance").on_hover_text(tooltip).clicked() {
+        if ui
+            .small_button("appearance")
+            .on_hover_text(tooltip)
+            .clicked()
+        {
             self.editor_settings_editor.load_from(&self.editor_settings);
         }
     }
@@ -2278,21 +2282,16 @@ impl eframe::App for LexwrightApp {
         if self.is_scratch() {
             let editor_focused = ui.ctx().memory(|memory| memory.has_focus(editor_id));
             if editor_focused
-                && ui.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                })
+                && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
             {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
 
             let enter = editor_focused
-                && ui.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                });
-            let alternate = ui.input_mut(|input| {
-                input.consume_key(egui::Modifiers::CTRL, egui::Key::J)
-            });
+                && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            let alternate =
+                ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::J));
             if enter || alternate {
                 self.begin_scratch_copy_quit(ui.ctx());
                 if self.scratch_copy_quit_pending {
@@ -2600,22 +2599,19 @@ impl eframe::App for LexwrightApp {
 
 fn apply_interface_font(ctx: &egui::Context, size: f32) {
     ctx.global_style_mut(|style| {
-        style.text_styles.insert(
-            egui::TextStyle::Body,
-            egui::FontId::proportional(size),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Button,
-            egui::FontId::proportional(size),
-        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(size));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(size));
         style.text_styles.insert(
             egui::TextStyle::Small,
             egui::FontId::proportional((size - 2.0).max(10.0)),
         );
-        style.text_styles.insert(
-            egui::TextStyle::Monospace,
-            egui::FontId::monospace(size),
-        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Monospace, egui::FontId::monospace(size));
         style.text_styles.insert(
             egui::TextStyle::Heading,
             egui::FontId::proportional(size + 4.0),
