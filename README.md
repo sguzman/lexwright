@@ -389,11 +389,18 @@ Lexwright also exposes launch profiles suitable for shell aliases and compositor
 lexwright --tab NAME
 lexwright --tab NAME --harper --ruleset RULESET
 lexwright --scratch --ruleset RULESET
+lexwright --scratch --overlay
 ```
 
 `--tab NAME` treats NAME as a logical durable tab name. If that tab is already registered it is activated; otherwise Lexwright creates/registers `documents/NAME.txt` and opens it. `--harper` enables Harper at startup. `--ruleset NAME` selects an existing expansion ruleset **for that process only**; it rebuilds the in-memory matcher without rewriting the globally active ruleset in `expansions.tsv`.
 
 `--scratch` is a separate ephemeral application mode, not a durable tab. It does not load or show the normal workspace, starts with an empty document, forces Harper on, never queues document persistence, and deliberately skips the shutdown-save path. Plain `--scratch` uses a durable expansion ruleset named `scratch`. If that ruleset does not exist, Lexwright clones the currently active ruleset into a new persistent `scratch` set, while preserving the globally active ruleset. Rules added to the scratch ruleset through **Save & activate** persist across future scratch sessions even though the scratch document text never does. `--scratch --ruleset NAME` applies the same create-if-missing behavior to NAME. The top bar shows a red **SCRATCH · NOT SAVED** warning. **Ctrl+J** is the primary scratch exit gesture on Linux: Lexwright pipes the complete buffer to `wl-copy`, waits only for its short-lived launcher/parent process to confirm that the background clipboard owner was established, and only then closes the editor. The visible **Copy + Quit** button uses the same path. If `wl-copy` is unavailable or fails, Lexwright remains open and shows **COPY FAILED** instead of discarding the draft. On Arch/EndeavourOS, `wl-copy` is provided by the `wl-clipboard` package. A crash or ordinary close still discards the scratch buffer.
+
+### Scratch overlay window
+
+Run `lexwright --scratch --overlay` for a compact, resizable scratch window over your existing desktop, while normal workspace mode (and plain `--scratch`) retain their usual tiling behavior. The top bar marks this window **FLOATING**; the scratch buffer, Harper, rulesets, and Ctrl+J Copy + Quit work exactly as in regular scratch mode. Overlay is deliberately not supported in workspace mode.
+
+On **Hyprland**, Lexwright asks the compositor to launch the scratch process with a one-time floating rule *before the window is mapped*, so the existing tile geometry is not rearranged. This requires `hyprctl` in PATH; the launcher supports both modern Lua-dispatch and older hyprlang-dispatch configurations, and reports an error instead of falling back to a tiled window if neither accepts the request. It does not modify Hyprland config or leave persistent rules. On other platforms, Lexwright requests a native always-on-top window; stacking and floating depend on the window manager/compositor. The overlay stays on its workspace rather than being pinned across workspaces.
 
 
 Lexwright stores the default ledger at:

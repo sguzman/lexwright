@@ -8,6 +8,7 @@ mod harper;
 mod jitter;
 mod metrics;
 mod navigation;
+mod overlay;
 mod probe;
 mod settings;
 mod storage;
@@ -35,13 +36,34 @@ fn main() -> eframe::Result<()> {
         }
     };
 
+    // Hyprland must float the window before mapping, not after tiling it.
+    match overlay::maybe_launch_via_hyprland(&launch) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("lexwright: {error}");
+            std::process::exit(1);
+        }
+    }
+
     let process_started = Instant::now();
+    let mut viewport = eframe::egui::ViewportBuilder::default();
+    if launch.overlay {
+        viewport = viewport
+            .with_inner_size([860.0, 540.0])
+            .with_min_inner_size([460.0, 310.0])
+            .with_app_id("lexwright-scratch-overlay")
+            .with_always_on_top();
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
+        viewport,
         ..Default::default()
     };
 
-    let window_title = if launch.scratch {
+    let window_title = if launch.overlay {
+        "Lexwright — Scratch Overlay"
+    } else if launch.scratch {
         "Lexwright — Scratch"
     } else {
         "Lexwright"

@@ -105,6 +105,7 @@ pub struct LexwrightApp {
     document: DocumentState,
     workspace: Option<Workspace>,
     mode: AppMode,
+    scratch_overlay: bool,
     ruleset_override: Option<String>,
     launch_error: Option<String>,
     focus_editor: bool,
@@ -199,6 +200,7 @@ impl LexwrightApp {
             document,
             workspace,
             mode,
+            scratch_overlay: launch.overlay,
             ruleset_override,
             launch_error,
             focus_editor: true,
@@ -821,6 +823,11 @@ impl LexwrightApp {
             if self.harper_enabled { "on" } else { "off" },
             self.document.buffer.expansion_active_set_name(),
         ));
+
+        if self.scratch_overlay {
+            ui.weak("FLOATING")
+                .on_hover_text("Scratch overlay: floats above tiled windows without resizing their layout.");
+        }
 
         if let Some(error) = &self.scratch_copy_error {
             ui.colored_label(egui::Color32::RED, "COPY FAILED")
