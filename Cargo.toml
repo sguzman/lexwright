@@ -3,7 +3,7 @@ name = "lexwright"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "A latency-first English IDE"
+description = "An ephemeral keyboard-first scratchpad with programmable text expansion"
 
 [dependencies]
 eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }

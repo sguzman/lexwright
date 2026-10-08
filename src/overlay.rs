@@ -24,7 +24,9 @@ pub(crate) fn maybe_launch_via_hyprland(launch: &LaunchOptions) -> Result<bool, 
     // including the user-provided ruleset, to preserve literal semantics.
     let arguments = std::iter::once(executable.to_string_lossy().into_owned())
         .chain(env::args().skip(1))
-        .chain(std::iter::once("--overlay-child".to_owned()))
+        // The parent may have launched with zero arguments: make the
+        // floating-child intent explicit to the CLI parser.
+        .chain(["--overlay".to_owned(), "--overlay-child".to_owned()])
         .map(|arg| shell_quote(&arg))
         .collect::<Vec<_>>()
         .join(" ");

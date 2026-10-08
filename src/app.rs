@@ -140,6 +140,7 @@ impl LexwrightApp {
         let mut visuals = egui::Visuals::dark();
         apply_cursor_visuals(&mut visuals, &editor_settings);
         cc.egui_ctx.set_visuals(visuals);
+        apply_interface_font(&cc.egui_ctx, editor_settings.ui_font_size);
         cc.egui_ctx.set_zoom_factor(editor_settings.zoom_factor);
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = true);
@@ -815,11 +816,9 @@ impl LexwrightApp {
     }
 
     fn show_scratch_controls(&mut self, ui: &mut egui::Ui) {
-        let label = egui::RichText::new("SCRATCH · NOT SAVED")
-            .color(egui::Color32::RED)
-            .strong();
+        let label = egui::RichText::new("SCRATCH · EPHEMERAL").strong();
         ui.label(label).on_hover_text(format!(
-            "Ephemeral scratch mode. Text is never written to disk.\nHarper: {}\nRuleset: {:?}\nCtrl+J: copy entire buffer with wl-copy and quit",
+            "Ephemeral scratch mode. Text is never written to disk.\nHarper: {}\nRuleset: {:?}\nEnter: copy and exit · Shift+Enter: newline · Escape: discard and exit",
             if self.harper_enabled { "on" } else { "off" },
             self.document.buffer.expansion_active_set_name(),
         ));
@@ -838,7 +837,7 @@ impl LexwrightApp {
         if ui
             .button("Copy + Quit")
             .on_hover_text(
-                "Send the entire scratch buffer to wl-copy. Lexwright closes only after wl-copy succeeds. Shortcut: Ctrl+J.",
+                "Copy scratch text and quit after wl-copy succeeds. Shortcut: Enter (or Ctrl+J).",
             )
             .clicked()
         {
@@ -921,8 +920,8 @@ impl LexwrightApp {
 
         egui::Window::new("Expansion rules")
             .open(&mut open)
-            .default_width(560.0)
-            .min_width(280.0)
+            .default_width(780.0)
+            .min_width(480.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -1076,7 +1075,7 @@ impl LexwrightApp {
                     .default_open(true)
                     .show(ui, |ui| {
                 let mut remove_index = None;
-                egui::ScrollArea::vertical()
+                egui::ScrollArea::both()
                     .max_height(340.0)
                     .show(ui, |ui| {
                         egui::Grid::new("lexwright_expansion_rule_grid")
@@ -1957,8 +1956,9 @@ impl LexwrightApp {
             )
         } else {
             format!(
-                "Editor font: {:.1}px\nUI zoom: {:.1}x\nCursor width: {:.1}px\nBlink: {}{}\nVim-lite: {}\nConfig: {}\n\nClick to configure.",
+                "Editor font: {:.1}px\nInterface font: {:.1}px\nUI zoom: {:.1}x\nCursor width: {:.1}px\nBlink: {}{}\nVim-lite: {}\nConfig: {}\n\nClick to configure.",
                 self.editor_settings.font_size,
+                self.editor_settings.ui_font_size,
                 self.editor_settings.zoom_factor,
                 self.editor_settings.cursor_width,
                 if self.editor_settings.cursor_blink {
@@ -1984,7 +1984,7 @@ impl LexwrightApp {
             )
         };
 
-        if ui.small_button("cursor").on_hover_text(tooltip).clicked() {
+        if ui.small_button("appearance").on_hover_text(tooltip).clicked() {
             self.editor_settings_editor.load_from(&self.editor_settings);
         }
     }
@@ -2070,6 +2070,37 @@ impl LexwrightApp {
 
                 ui.add_space(8.0);
                 ui.separator();
+                ui.strong("Interface");
+                let mut ui_font_size = self.editor_settings.ui_font_size;
+                let ui_font_response = ui.add(
+                    egui::Slider::new(&mut ui_font_size, 10.0..=36.0)
+                        .text("interface font size (px)")
+                        .fixed_decimals(1),
+                );
+                if ui_font_response.changed() {
+                    let previous = self.editor_settings.ui_font_size;
+                    self.editor_settings.ui_font_size = ui_font_size;
+                    match settings::save_ui_font_size(&self.editor_settings_path, ui_font_size) {
+                        Ok(merged) => {
+                            self.editor_settings = merged;
+                            self.editor_settings_editor.draft.ui_font_size = ui_font_size;
+                            self.editor_settings_error = None;
+                            self.editor_settings_editor.status =
+                                Some(format!("saved interface font size {:.1}px", ui_font_size));
+                            apply_interface_font(ctx, ui_font_size);
+                        }
+                        Err(error) => {
+                            self.editor_settings.ui_font_size = previous;
+                            self.editor_settings_editor.draft.ui_font_size = previous;
+                            self.editor_settings_error = Some(error.clone());
+                            self.editor_settings_editor.status =
+                                Some(format!("cannot save interface font size: {error}"));
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.strong("Cursor");
                 ui.add(
                     egui::Slider::new(
@@ -2132,7 +2163,7 @@ impl LexwrightApp {
 
                 ui.add_space(4.0);
                 ui.weak(
-                    "The slider changes the editor text font. Ctrl++ / Ctrl+=, Ctrl+-, and Ctrl+0 use egui's native whole-app zoom; Lexwright persists that zoom after a brief idle. Cursor/navigation settings are applied only when Save settings is pressed.",
+                    "Editor and interface fonts are independent and saved immediately. Interface size scales settings, rules and their input fields. Ctrl++ / Ctrl+=, Ctrl+-, and Ctrl+0 still control whole-app zoom. Cursor/navigation settings require Save settings.",
                 );
             });
 
@@ -2240,10 +2271,35 @@ impl eframe::App for LexwrightApp {
 
         self.sync_zoom_preference(ui.ctx());
 
-        if self.is_scratch()
-            && ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::J))
-        {
-            self.begin_scratch_copy_quit(ui.ctx());
+        // Only intercept unmodified Enter/Escape while the scratch text editor
+        // is focused. Settings and rule inputs must retain their own keys.
+        let editor_id =
+            egui::Id::new(("lexwright-ledger-editor", self.document.path_label.as_str()));
+        if self.is_scratch() {
+            let editor_focused = ui.ctx().memory(|memory| memory.has_focus(editor_id));
+            if editor_focused
+                && ui.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                })
+            {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+
+            let enter = editor_focused
+                && ui.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                });
+            let alternate = ui.input_mut(|input| {
+                input.consume_key(egui::Modifiers::CTRL, egui::Key::J)
+            });
+            if enter || alternate {
+                self.begin_scratch_copy_quit(ui.ctx());
+                if self.scratch_copy_quit_pending {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+            }
         }
 
         // The status bar contains dynamic text. In egui, a widget wider than max_rect
@@ -2278,7 +2334,18 @@ impl eframe::App for LexwrightApp {
 
         ui.add_space(6.0);
         let compact_top_bar = editor_viewport_width < 1180.0;
-        if compact_top_bar {
+        if self.is_scratch() {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Lexwright");
+                ui.separator();
+                self.show_scratch_controls(ui);
+                self.show_launch_error(ui);
+                ui.separator();
+                self.show_expansion_status_compact(ui);
+                ui.separator();
+                self.show_cursor_status(ui);
+            });
+        } else if compact_top_bar {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Lexwright");
                 ui.separator();
@@ -2349,8 +2416,6 @@ impl eframe::App for LexwrightApp {
         self.show_harper_window(ui.ctx());
         self.show_editor_settings_window(ui.ctx());
 
-        let editor_id =
-            egui::Id::new(("lexwright-ledger-editor", self.document.path_label.as_str()));
         self.apply_pending_external_edit(ui.ctx(), editor_id);
         let nav_command = self
             .vim_lite
@@ -2531,6 +2596,31 @@ impl eframe::App for LexwrightApp {
             let _ = workspace.flush_inactive();
         }
     }
+}
+
+fn apply_interface_font(ctx: &egui::Context, size: f32) {
+    ctx.global_style_mut(|style| {
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::proportional(size),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::proportional(size),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            egui::FontId::proportional((size - 2.0).max(10.0)),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Monospace,
+            egui::FontId::monospace(size),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::proportional(size + 4.0),
+        );
+    });
 }
 
 fn apply_cursor_visuals(visuals: &mut egui::Visuals, settings: &EditorSettings) {

@@ -9,6 +9,7 @@ use std::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditorSettings {
     pub font_size: f32,
+    pub ui_font_size: f32,
     pub zoom_factor: f32,
     pub cursor_width: f32,
     pub cursor_blink: bool,
@@ -21,6 +22,7 @@ impl Default for EditorSettings {
     fn default() -> Self {
         Self {
             font_size: 18.0,
+            ui_font_size: 17.0,
             zoom_factor: 1.0,
             cursor_width: 2.0,
             cursor_blink: true,
@@ -37,6 +39,13 @@ impl EditorSettings {
             return Err(format!(
                 "font size must be between 8.0 and 48.0, got {}",
                 self.font_size
+            ));
+        }
+
+        if !(10.0..=36.0).contains(&self.ui_font_size) {
+            return Err(format!(
+                "interface font size must be between 10.0 and 36.0, got {}",
+                self.ui_font_size
             ));
         }
 
@@ -99,6 +108,24 @@ pub fn save_font_size(path: &Path, font_size: f32) -> Result<EditorSettings, Str
     Ok(reloaded)
 }
 
+pub fn save_ui_font_size(path: &Path, ui_font_size: f32) -> Result<EditorSettings, String> {
+    let mut current = load(path)?;
+    current.ui_font_size = ui_font_size;
+    save(path, &current)?;
+
+    let reloaded = load(path)?;
+    if reloaded.ui_font_size != ui_font_size {
+        return Err(format!(
+            "interface font verification failed for {}: requested {}, reloaded {}",
+            path.display(),
+            ui_font_size,
+            reloaded.ui_font_size
+        ));
+    }
+
+    Ok(reloaded)
+}
+
 pub fn save_zoom_factor(path: &Path, zoom_factor: f32) -> Result<EditorSettings, String> {
     let mut current = load(path)?;
     current.zoom_factor = zoom_factor;
@@ -124,6 +151,7 @@ pub fn save_preserving_display_settings(
     let current = load(path)?;
     let mut merged = settings.clone();
     merged.font_size = current.font_size;
+    merged.ui_font_size = current.ui_font_size;
     merged.zoom_factor = current.zoom_factor;
     save(path, &merged)?;
     Ok(merged)
@@ -140,6 +168,7 @@ pub fn save(path: &Path, settings: &EditorSettings) -> Result<(), String> {
     let contents = format!(
         "# Lexwright editor settings\n\
          font_size\t{}\n\
+         ui_font_size\t{}\n\
          zoom_factor\t{}\n\
          cursor_width\t{}\n\
          cursor_blink\t{}\n\
@@ -147,6 +176,7 @@ pub fn save(path: &Path, settings: &EditorSettings) -> Result<(), String> {
          cursor_off_seconds\t{}\n\
          vim_lite\t{}\n",
         settings.font_size,
+        settings.ui_font_size,
         settings.zoom_factor,
         settings.cursor_width,
         settings.cursor_blink,
@@ -218,6 +248,9 @@ fn parse(contents: &str, path: &Path) -> Result<EditorSettings, String> {
         match key {
             "font_size" => {
                 settings.font_size = parse_f32(path, line_number, key, value)?;
+            }
+            "ui_font_size" => {
+                settings.ui_font_size = parse_f32(path, line_number, key, value)?;
             }
             "zoom_factor" => {
                 settings.zoom_factor = parse_f32(path, line_number, key, value)?;
@@ -304,13 +337,13 @@ mod tests {
 
     use super::{
         EditorSettings, load, parse, save, save_font_size, save_preserving_display_settings,
-        save_zoom_factor,
+        save_ui_font_size, save_zoom_factor,
     };
 
     #[test]
     fn parses_editor_settings() {
         let settings = parse(
-            "font_size\t22\nzoom_factor\t1.4\ncursor_width\t4\ncursor_blink\tfalse\ncursor_on_seconds\t0.25\ncursor_off_seconds\t0.75\nvim_lite\ttrue\n",
+            "font_size\t22\nui_font_size\t20\nzoom_factor\t1.4\ncursor_width\t4\ncursor_blink\tfalse\ncursor_on_seconds\t0.25\ncursor_off_seconds\t0.75\nvim_lite\ttrue\n",
             Path::new("editor.tsv"),
         )
         .expect("settings parse failed");
@@ -319,6 +352,7 @@ mod tests {
             settings,
             EditorSettings {
                 font_size: 22.0,
+                ui_font_size: 20.0,
                 zoom_factor: 1.4,
                 cursor_width: 4.0,
                 cursor_blink: false,
@@ -336,6 +370,7 @@ mod tests {
 
         assert_eq!(settings.cursor_width, 3.0);
         assert_eq!(settings.font_size, 18.0);
+        assert_eq!(settings.ui_font_size, 17.0);
         assert_eq!(settings.zoom_factor, 1.0);
         assert!(settings.cursor_blink);
         assert!(!settings.vim_lite);
@@ -352,6 +387,7 @@ mod tests {
         let path = directory.join("editor.tsv");
         let expected = EditorSettings {
             font_size: 27.5,
+            ui_font_size: 22.0,
             zoom_factor: 1.3,
             cursor_width: 3.0,
             vim_lite: true,
@@ -364,6 +400,7 @@ mod tests {
 
         let raw = fs::read_to_string(&path).expect("settings file unreadable");
         assert!(raw.contains("font_size\t27.5"));
+        assert!(raw.contains("ui_font_size\t22"));
         assert!(raw.contains("zoom_factor\t1.3"));
 
         let _ = fs::remove_dir_all(directory);
@@ -418,6 +455,7 @@ mod tests {
         let stale = original.clone();
         save_font_size(&path, 31.0).expect("font-size save failed");
         save_zoom_factor(&path, 1.7).expect("zoom save failed");
+        save_ui_font_size(&path, 24.0).expect("interface font save failed");
 
         let mut stale_cursor_edit = stale;
         stale_cursor_edit.cursor_width = 5.0;
@@ -425,11 +463,13 @@ mod tests {
             .expect("merged cursor save failed");
 
         assert_eq!(merged.font_size, 31.0);
+        assert_eq!(merged.ui_font_size, 24.0);
         assert_eq!(merged.zoom_factor, 1.7);
         assert_eq!(merged.cursor_width, 5.0);
 
         let reloaded = load(&path).expect("settings reload failed");
         assert_eq!(reloaded.font_size, 31.0);
+        assert_eq!(reloaded.ui_font_size, 24.0);
         assert_eq!(reloaded.zoom_factor, 1.7);
 
         let _ = fs::remove_dir_all(directory);
@@ -440,6 +480,13 @@ mod tests {
         let error = parse("font_size\t99\n", Path::new("editor.tsv"))
             .expect_err("invalid font size unexpectedly parsed");
         assert!(error.contains("font size"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_interface_font_size() {
+        let error = parse("ui_font_size\t99\n", Path::new("editor.tsv"))
+            .expect_err("invalid interface font unexpectedly parsed");
+        assert!(error.contains("interface font size"));
     }
 
     #[test]
