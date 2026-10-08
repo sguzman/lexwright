@@ -33,9 +33,7 @@ pub(crate) fn maybe_launch_via_hyprland(launch: &LaunchOptions) -> Result<bool, 
     let command = format!("exec {arguments}");
 
     // Modern Lua config and legacy hyprlang config use different dispatch APIs.
-    let lua_dispatch = format!(
-        "hl.dsp.exec_cmd({command:?}, {{ float = true, center = true }})"
-    );
+    let lua_dispatch = format!("hl.dsp.exec_cmd({command:?}, {{ float = true, center = true }})");
     let legacy_dispatch = format!("[float; center] {command}");
     let variants: [Vec<&str>; 2] = [
         vec!["dispatch", &lua_dispatch],
