@@ -80,3 +80,7 @@ cargo fmt --all -- --check
 CI runs these checks on every push to `main`.
 
 Technical details and the preserved secondary editor architecture live in [ARCHITECTURE.md](ARCHITECTURE.md). Historical incident notes are in [docs/incidents](docs/incidents).
+
+## License
+
+Original Lexwright code is available under the [MIT License](LICENSE). Third-party dependencies retain their own licenses.
