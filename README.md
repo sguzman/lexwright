@@ -20,12 +20,11 @@ That opens an empty scratchpad in its default overlay mode. Every invocation sta
 
 | Key | Scratch behavior |
 | --- | --- |
-| **Enter** | Copy the whole scratch text using `wl-copy`, then close |
+| **Enter** | Copy nonblank scratch text using `wl-copy`, then close; blank text just closes |
 | **Shift+Enter** | Insert a newline |
-| **Escape** | Close and discard scratch text, leaving the clipboard unchanged |
-| **Ctrl+J** | Compatibility shortcut for copy and exit |
+| **Escape** | Close and discard scratch text from anywhere in scratch mode, leaving the clipboard unchanged |
 
-Copying requires the Wayland `wl-copy` command from **wl-clipboard**. If clipboard delivery fails, Lexwright stays open and reports the failure instead of discarding your text.
+Copying requires the Wayland `wl-copy` command from **wl-clipboard**. If clipboard delivery fails, Lexwright stays open and reports the failure instead of discarding your text. Enter with empty or whitespace-only text skips `wl-copy` entirely and preserves the clipboard. Ctrl+J is no longer a Lexwright shortcut.
 
 On Hyprland, Lexwright arranges for the floating window rule **before** mapping the window, so a tiled workspace is not temporarily rearranged. Scratch remains available on other compositors, though non-Hyprland compositors may need their own window rules to guarantee floating.
 

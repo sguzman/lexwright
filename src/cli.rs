@@ -165,7 +165,7 @@ Options:\n\
   --latency-probe  Run the editor latency probe and exit.\n\
   -h, --help       Show this help.\n\n\
 Scratch shortcuts: Enter copies and exits; Shift+Enter inserts a newline;\n\
-Escape discards and exits. Ctrl+J remains an alternate copy-and-exit shortcut.\n\
+Escape discards and exits. Blank text exits without changing the clipboard.\n\
 Scratch text is never saved. Rules and preferences persist.\n"
 }
 

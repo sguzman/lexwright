@@ -759,12 +759,20 @@ impl LexwrightApp {
         }
     }
 
-    fn begin_scratch_copy_quit(&mut self, ctx: &egui::Context) {
+    fn begin_scratch_submit(&mut self, ctx: &egui::Context) {
         if !self.is_scratch() || self.scratch_copy_quit_pending {
             return;
         }
 
         self.scratch_copy_error = None;
+
+        // Empty or whitespace-only scratch text is dismissal, never a clipboard
+        // replacement. Do not invoke wl-copy at all for a blank buffer.
+        if scratch_submit_action(self.document.buffer.text()) == ScratchSubmitAction::CloseWithoutCopy {
+            self.scratch_copy_quit_pending = true;
+            ctx.request_repaint();
+            return;
+        }
 
         let result = (|| -> Result<(), String> {
             let mut child = Command::new("wl-copy")
@@ -818,7 +826,7 @@ impl LexwrightApp {
     fn show_scratch_controls(&mut self, ui: &mut egui::Ui) {
         let label = egui::RichText::new("SCRATCH · EPHEMERAL").strong();
         ui.label(label).on_hover_text(format!(
-            "Ephemeral scratch mode. Text is never written to disk.\nHarper: {}\nRuleset: {:?}\nEnter: copy and exit · Shift+Enter: newline · Escape: discard and exit",
+            "Ephemeral scratch mode. Text is never written to disk.\nHarper: {}\nRuleset: {:?}\nEnter: copy and exit (blank: exit without copying) · Shift+Enter: newline · Escape: discard and exit",
             if self.harper_enabled { "on" } else { "off" },
             self.document.buffer.expansion_active_set_name(),
         ));
@@ -837,11 +845,11 @@ impl LexwrightApp {
         if ui
             .button("Copy + Quit")
             .on_hover_text(
-                "Copy scratch text and quit after wl-copy succeeds. Shortcut: Enter (or Ctrl+J).",
+                "Copy scratch text and quit after wl-copy succeeds. If blank, quit without changing the clipboard. Shortcut: Enter.",
             )
             .clicked()
         {
-            self.begin_scratch_copy_quit(ui.ctx());
+            self.begin_scratch_submit(ui.ctx());
         }
     }
 
@@ -2264,6 +2272,47 @@ impl LexwrightApp {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScratchSubmitAction {
+    CloseWithoutCopy,
+    CopyAndClose,
+}
+
+fn scratch_submit_action(text: &str) -> ScratchSubmitAction {
+    if text.trim().is_empty() {
+        ScratchSubmitAction::CloseWithoutCopy
+    } else {
+        ScratchSubmitAction::CopyAndClose
+    }
+}
+
+#[cfg(test)]
+mod scratch_submit_tests {
+    use super::{ScratchSubmitAction, scratch_submit_action};
+
+    #[test]
+    fn blank_scratch_never_needs_clipboard_handoff() {
+        for text in ["", " ", "  \t\n  ", "\r\n", "\u{2003}"] {
+            assert_eq!(
+                scratch_submit_action(text),
+                ScratchSubmitAction::CloseWithoutCopy,
+                "unexpected clipboard write for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nonblank_scratch_still_copies() {
+        for text in ["hello", " line\n", "0", "🙂", "  abc  "] {
+            assert_eq!(
+                scratch_submit_action(text),
+                ScratchSubmitAction::CopyAndClose,
+                "unexpected discard for {text:?}"
+            );
+        }
+    }
+}
+
 impl eframe::App for LexwrightApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
@@ -2275,25 +2324,22 @@ impl eframe::App for LexwrightApp {
 
         self.sync_zoom_preference(ui.ctx());
 
-        // Only intercept unmodified Enter/Escape while the scratch text editor
-        // is focused. Settings and rule inputs must retain their own keys.
+        // Escape dismisses scratch even when settings or rules have focus.
+        // Enter submits only from the scratch editor; Shift+Enter and other
+        // widgets retain their native keyboard handling.
         let editor_id =
             egui::Id::new(("lexwright-ledger-editor", self.document.path_label.as_str()));
         if self.is_scratch() {
-            let editor_focused = ui.ctx().memory(|memory| memory.has_focus(editor_id));
-            if editor_focused
-                && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-            {
+            if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
 
+            let editor_focused = ui.ctx().memory(|memory| memory.has_focus(editor_id));
             let enter = editor_focused
                 && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-            let alternate =
-                ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::J));
-            if enter || alternate {
-                self.begin_scratch_copy_quit(ui.ctx());
+            if enter {
+                self.begin_scratch_submit(ui.ctx());
                 if self.scratch_copy_quit_pending {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     return;
