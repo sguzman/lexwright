@@ -1,0 +1,2780 @@
+use std::{
+    env, fs,
+    io::Write,
+    path::PathBuf,
+    process::{Command, Stdio},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use eframe::egui;
+
+use crate::{
+    analysis::{LexicalClass, LexicalSpan, MorphClass, MorphSpan},
+    cli::LaunchOptions,
+    document::{DocumentState, PendingExternalEdit},
+    editor_buffer::{EditDelta, EditorBuffer},
+    expansion::ExpansionRule,
+    harper::{HarperDiagnostic, HarperSuggestion},
+    jitter::{JitterFrame, JitterRecorder},
+    metrics::TimingMetric,
+    navigation::VimLite,
+    settings::{self, EditorSettings},
+    storage::SaveEvent,
+    workspace::Workspace,
+};
+
+const HARPER_IDLE: Duration = Duration::from_millis(25);
+const HARPER_DISPLAY_INVALIDATION_BYTES: usize = 192;
+const AUTOSAVE_IDLE: Duration = Duration::from_millis(160);
+const SAVE_STATUS_POLL: Duration = Duration::from_millis(40);
+const ZOOM_SAVE_IDLE: Duration = Duration::from_millis(180);
+
+struct AppMetrics {
+    process_started: Instant,
+    first_ui: Option<Duration>,
+    frame_cpu: TimingMetric,
+    snapshot_clone: TimingMetric,
+    background_save: TimingMetric,
+}
+
+impl AppMetrics {
+    fn new(process_started: Instant) -> Self {
+        Self {
+            process_started,
+            first_ui: None,
+            frame_cpu: TimingMetric::default(),
+            snapshot_clone: TimingMetric::default(),
+            background_save: TimingMetric::default(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RuleEditor {
+    open: bool,
+    active_set: String,
+    note: String,
+    rename_set_name: String,
+    starter_enabled: bool,
+    rules: Vec<ExpansionRule>,
+    new_trigger: String,
+    new_replacement: String,
+    new_allow_capitalized: bool,
+    new_set_name: String,
+    status: Option<String>,
+}
+
+impl RuleEditor {
+    fn load_from(&mut self, buffer: &EditorBuffer) {
+        self.open = true;
+        self.active_set = buffer.expansion_active_set_name().to_owned();
+        self.note = buffer.expansion_active_set_note().to_owned();
+        self.rename_set_name = self.active_set.clone();
+        self.starter_enabled = buffer.expansion_starter_enabled();
+        self.rules = buffer.expansion_user_rules().to_vec();
+        self.new_trigger.clear();
+        self.new_replacement.clear();
+        self.new_allow_capitalized = false;
+        self.status = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppMode {
+    Workspace,
+    Scratch,
+}
+
+#[derive(Default)]
+struct EditorSettingsEditor {
+    open: bool,
+    draft: EditorSettings,
+    status: Option<String>,
+}
+
+impl EditorSettingsEditor {
+    fn load_from(&mut self, settings: &EditorSettings) {
+        self.open = true;
+        self.draft = settings.clone();
+        self.status = None;
+    }
+}
+
+pub struct LexwrightApp {
+    document: DocumentState,
+    workspace: Option<Workspace>,
+    mode: AppMode,
+    ruleset_override: Option<String>,
+    launch_error: Option<String>,
+    focus_editor: bool,
+    metrics: AppMetrics,
+    rule_editor: RuleEditor,
+    structure_overlay: bool,
+    morphology_overlay: bool,
+    lexeme_window: bool,
+    expansion_candidate_window: bool,
+    harper_enabled: bool,
+    harper_window: bool,
+    jitter_recorder: JitterRecorder,
+    editor_settings: EditorSettings,
+    editor_settings_path: PathBuf,
+    editor_settings_error: Option<String>,
+    editor_settings_editor: EditorSettingsEditor,
+    zoom_save_deadline: Option<Instant>,
+    vim_lite: VimLite,
+    status_window: bool,
+    scratch_copy_quit_pending: bool,
+    scratch_copy_error: Option<String>,
+}
+
+impl LexwrightApp {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        process_started: Instant,
+        launch: LaunchOptions,
+    ) -> Self {
+        let (editor_settings, editor_settings_path, editor_settings_error) =
+            settings::load_default();
+        let mut visuals = egui::Visuals::dark();
+        apply_cursor_visuals(&mut visuals, &editor_settings);
+        cc.egui_ctx.set_visuals(visuals);
+        cc.egui_ctx.set_zoom_factor(editor_settings.zoom_factor);
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = true);
+
+        let mode = if launch.scratch {
+            AppMode::Scratch
+        } else {
+            AppMode::Workspace
+        };
+
+        let (workspace, mut document, mut launch_error) = if launch.scratch {
+            (None, DocumentState::scratch(), None)
+        } else {
+            let (mut workspace, mut document) = Workspace::load_default();
+            let error = launch.tab.as_deref().and_then(|name| {
+                workspace
+                    .ensure_named_and_activate(&mut document, name)
+                    .err()
+                    .map(|error| format!("could not open tab {name:?}: {error}"))
+            });
+            (Some(workspace), document, error)
+        };
+
+        let requested_ruleset = if launch.scratch {
+            Some(
+                launch
+                    .ruleset
+                    .clone()
+                    .unwrap_or_else(|| "scratch".to_owned()),
+            )
+        } else {
+            launch.ruleset.clone()
+        };
+
+        if let Some(name) = requested_ruleset.as_deref() {
+            let result = if launch.scratch {
+                document
+                    .buffer
+                    .ensure_expansion_set_runtime(name)
+                    .map(|_| ())
+            } else {
+                document.buffer.select_expansion_set_runtime(name)
+            };
+
+            if let Err(error) = result {
+                let message = format!("could not use ruleset {name:?}: {error}");
+                launch_error = Some(match launch_error {
+                    Some(previous) => format!("{previous}; {message}"),
+                    None => message,
+                });
+            }
+        }
+
+        let harper_enabled = launch.harper_on_start();
+        let ruleset_override = requested_ruleset;
+
+        let mut app = Self {
+            document,
+            workspace,
+            mode,
+            ruleset_override,
+            launch_error,
+            focus_editor: true,
+            metrics: AppMetrics::new(process_started),
+            rule_editor: RuleEditor::default(),
+            structure_overlay: false,
+            morphology_overlay: false,
+            lexeme_window: false,
+            expansion_candidate_window: false,
+            harper_enabled,
+            harper_window: false,
+            jitter_recorder: JitterRecorder::new(),
+            editor_settings,
+            editor_settings_path,
+            editor_settings_error,
+            editor_settings_editor: EditorSettingsEditor::default(),
+            zoom_save_deadline: None,
+            vim_lite: VimLite::default(),
+            status_window: false,
+            scratch_copy_quit_pending: false,
+            scratch_copy_error: None,
+        };
+
+        if app.harper_enabled {
+            app.queue_harper_current();
+        }
+
+        app
+    }
+
+    fn is_scratch(&self) -> bool {
+        self.mode == AppMode::Scratch
+    }
+
+    fn sync_zoom_preference(&mut self, ctx: &egui::Context) {
+        let zoom_factor = ctx.zoom_factor();
+        if (zoom_factor - self.editor_settings.zoom_factor).abs() > 0.0001 {
+            self.editor_settings.zoom_factor = zoom_factor;
+            self.zoom_save_deadline = Some(Instant::now() + ZOOM_SAVE_IDLE);
+            ctx.request_repaint_after(ZOOM_SAVE_IDLE);
+        }
+
+        let Some(deadline) = self.zoom_save_deadline else {
+            return;
+        };
+
+        let now = Instant::now();
+        if now < deadline {
+            ctx.request_repaint_after(deadline.saturating_duration_since(now));
+            return;
+        }
+
+        self.zoom_save_deadline = None;
+        match settings::save_zoom_factor(&self.editor_settings_path, zoom_factor) {
+            Ok(merged) => {
+                self.editor_settings.zoom_factor = merged.zoom_factor;
+                self.editor_settings_error = None;
+            }
+            Err(error) => {
+                self.editor_settings_error = Some(error);
+            }
+        }
+    }
+
+    fn flush_zoom_preference(&mut self) {
+        if self.zoom_save_deadline.take().is_none() {
+            return;
+        }
+
+        if let Err(error) =
+            settings::save_zoom_factor(&self.editor_settings_path, self.editor_settings.zoom_factor)
+        {
+            self.editor_settings_error = Some(error);
+        }
+    }
+
+    fn mark_edited(&mut self, ctx: &egui::Context) {
+        let edits = self.document.buffer.take_edit_deltas();
+        if edits.is_empty() {
+            return;
+        }
+
+        let previous_revision = self.document.revision;
+        let next_revision = self.document.revision.wrapping_add(1);
+
+        self.rebase_harper_display(previous_revision, next_revision, &edits);
+
+        self.document.revision = next_revision;
+        self.document.last_edit = Some(Instant::now());
+        self.document.save_error = None;
+        self.document.snapshot_revision = None;
+        self.document.snapshot_cache = None;
+
+        ctx.request_repaint_after(if self.harper_enabled {
+            HARPER_IDLE
+        } else {
+            AUTOSAVE_IDLE
+        });
+    }
+
+    fn rebase_harper_display(
+        &mut self,
+        previous_revision: u64,
+        next_revision: u64,
+        edits: &[EditDelta],
+    ) {
+        if !self.harper_enabled
+            || self.document.harper_display_revision != Some(previous_revision)
+            || edits.is_empty()
+        {
+            return;
+        }
+
+        let mut diagnostics = self.document.harper_display_diagnostics.to_vec();
+
+        for edit in edits {
+            let byte_delta = edit.new_end_byte as isize - edit.old_end_byte as isize;
+            let char_delta = edit.new_end_char as isize - edit.old_end_char as isize;
+            let dirty_start = edit
+                .start_byte
+                .saturating_sub(HARPER_DISPLAY_INVALIDATION_BYTES);
+            let dirty_end = edit
+                .old_end_byte
+                .saturating_add(HARPER_DISPLAY_INVALIDATION_BYTES);
+
+            diagnostics = diagnostics
+                .into_iter()
+                .filter_map(|mut diagnostic| {
+                    if diagnostic.end_byte > dirty_start && diagnostic.start_byte < dirty_end {
+                        return None;
+                    }
+
+                    if diagnostic.start_byte >= edit.old_end_byte {
+                        diagnostic.start_byte = shift_index(diagnostic.start_byte, byte_delta)?;
+                        diagnostic.end_byte = shift_index(diagnostic.end_byte, byte_delta)?;
+                        diagnostic.start_char = shift_index(diagnostic.start_char, char_delta)?;
+                        diagnostic.end_char = shift_index(diagnostic.end_char, char_delta)?;
+                    }
+
+                    Some(diagnostic)
+                })
+                .collect();
+        }
+
+        self.document.harper_display_diagnostics = diagnostics.into();
+        self.document.harper_display_revision = Some(next_revision);
+    }
+
+    fn current_snapshot(&mut self) -> Arc<str> {
+        if self.document.snapshot_revision == Some(self.document.revision)
+            && let Some(snapshot) = &self.document.snapshot_cache
+        {
+            return Arc::clone(snapshot);
+        }
+
+        let started = Instant::now();
+        let snapshot = Arc::<str>::from(self.document.buffer.text());
+        self.metrics.snapshot_clone.observe(started.elapsed());
+        self.document.snapshot_revision = Some(self.document.revision);
+        self.document.snapshot_cache = Some(Arc::clone(&snapshot));
+        snapshot
+    }
+
+    fn poll_save_events(&mut self) {
+        while let Some(event) = self.document.store.poll() {
+            match event {
+                SaveEvent::Saved { revision, elapsed } => {
+                    self.metrics.background_save.observe(elapsed);
+                    self.document.saved_revision = self.document.saved_revision.max(revision);
+                    if revision >= self.document.revision {
+                        self.document.save_error = None;
+                    }
+                }
+                SaveEvent::Failed {
+                    revision,
+                    elapsed,
+                    error,
+                } => {
+                    self.metrics.background_save.observe(elapsed);
+                    if revision >= self.document.saved_revision {
+                        self.document.save_error = Some(error);
+                    }
+                }
+            }
+        }
+    }
+
+    fn queue_current_revision(&mut self) {
+        if self.is_scratch() {
+            self.queue_analysis_current(self.expansion_candidate_window);
+            return;
+        }
+
+        if self.document.queued_revision >= self.document.revision {
+            return;
+        }
+
+        let revision = self.document.revision;
+        let snapshot = self.current_snapshot();
+
+        match self
+            .document
+            .store
+            .queue_save(revision, Arc::clone(&snapshot))
+        {
+            Ok(()) => {
+                self.document.queued_revision = revision;
+            }
+            Err(error) => {
+                self.document.save_error = Some(error);
+            }
+        }
+
+        self.queue_analysis_snapshot(revision, snapshot, self.expansion_candidate_window);
+    }
+
+    fn queue_analysis_snapshot(
+        &mut self,
+        revision: u64,
+        snapshot: Arc<str>,
+        mine_expansion_candidates: bool,
+    ) {
+        match self
+            .document
+            .analysis_worker
+            .queue(revision, snapshot, mine_expansion_candidates)
+        {
+            Ok(()) => {
+                self.document.analysis_pending_revision = Some(revision);
+                self.document.analysis_error = None;
+            }
+            Err(error) => {
+                self.document.analysis_pending_revision = None;
+                self.document.analysis_error = Some(error);
+            }
+        }
+    }
+
+    fn queue_analysis_current(&mut self, mine_expansion_candidates: bool) {
+        let revision = self.document.revision;
+        let snapshot = self.current_snapshot();
+        self.queue_analysis_snapshot(revision, snapshot, mine_expansion_candidates);
+    }
+
+    fn poll_analysis(&mut self) {
+        while let Some(result) = self.document.analysis_worker.poll() {
+            let should_store = self
+                .document
+                .analysis_latest
+                .as_ref()
+                .is_none_or(|previous| {
+                    result.revision > previous.revision
+                        || (result.revision == previous.revision
+                            && (result.expansion_candidates_mined
+                                || !previous.expansion_candidates_mined))
+                });
+
+            if should_store {
+                if self
+                    .document
+                    .analysis_pending_revision
+                    .is_some_and(|pending| result.revision >= pending)
+                {
+                    self.document.analysis_pending_revision = None;
+                }
+                self.document.analysis_latest = Some(result);
+            }
+        }
+    }
+
+    fn queue_harper_current(&mut self) {
+        if !self.harper_enabled
+            || self
+                .document
+                .harper_pending_revision
+                .is_some_and(|pending| pending >= self.document.revision)
+            || self
+                .document
+                .harper_latest
+                .as_ref()
+                .is_some_and(|result| result.revision >= self.document.revision)
+        {
+            return;
+        }
+
+        let revision = self.document.revision;
+        let snapshot = self.current_snapshot();
+        match self.document.harper_worker.queue(revision, snapshot) {
+            Ok(()) => {
+                self.document.harper_pending_revision = Some(revision);
+                self.document.harper_error = None;
+            }
+            Err(error) => {
+                self.document.harper_pending_revision = None;
+                self.document.harper_error = Some(error);
+            }
+        }
+    }
+
+    fn maybe_queue_harper(&mut self) {
+        if !self.harper_enabled {
+            return;
+        }
+
+        let Some(last_edit) = self.document.last_edit else {
+            return;
+        };
+
+        if last_edit.elapsed() >= HARPER_IDLE {
+            self.queue_harper_current();
+        } else {
+            let remaining = HARPER_IDLE.saturating_sub(last_edit.elapsed());
+            // The caller always has a Context available, so the UI loop requests this
+            // repaint separately after invoking maybe_queue_harper.
+            let _ = remaining;
+        }
+    }
+
+    fn poll_harper(&mut self) {
+        while let Some(result) = self.document.harper_worker.poll() {
+            if !self.harper_enabled {
+                continue;
+            }
+
+            let should_store = self
+                .document
+                .harper_latest
+                .as_ref()
+                .is_none_or(|previous| result.revision >= previous.revision);
+
+            if should_store {
+                if self
+                    .document
+                    .harper_pending_revision
+                    .is_some_and(|pending| result.revision >= pending)
+                {
+                    self.document.harper_pending_revision = None;
+                }
+
+                if result.revision == self.document.revision {
+                    self.document.harper_display_revision = Some(result.revision);
+                    self.document.harper_display_diagnostics = Arc::clone(&result.diagnostics);
+                }
+
+                self.document.harper_latest = Some(result);
+            }
+        }
+    }
+
+    fn apply_pending_external_edit(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
+        let Some(edit) = self.document.pending_external_edit.take() else {
+            return;
+        };
+
+        if edit.expected_revision != self.document.revision {
+            self.document.harper_action_status = Some(
+                "suggestion expired because the ledger changed before it was applied".to_owned(),
+            );
+            return;
+        }
+
+        let mut state = egui::TextEdit::load_state(ctx, editor_id).unwrap_or_default();
+        let old_cursor = state.cursor.char_range().unwrap_or_else(|| {
+            egui::text::CCursorRange::one(egui::text::CCursor::new(
+                self.document.buffer.text().chars().count(),
+            ))
+        });
+
+        // Programmatic edits explicitly seed egui's undoer with the pre-edit state.
+        // The TextEdit sees the mutated state immediately afterwards, so Ctrl+Z can
+        // return to the exact text/cursor state that existed before the suggestion.
+        let old_text = self.document.buffer.text().to_owned();
+        let mut undoer = state.undoer();
+        undoer.add_undo(&(old_cursor, old_text));
+
+        match self
+            .document
+            .buffer
+            .replace_byte_range(edit.start_byte..edit.end_byte, &edit.replacement)
+        {
+            Ok(cursor_char) => {
+                let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_char));
+                state.cursor.set_char_range(Some(cursor));
+                state.set_undoer(undoer);
+                state.store(ctx, editor_id);
+
+                self.mark_edited(ctx);
+                self.focus_editor = true;
+                self.document.harper_action_status = Some(format!(
+                    "applied {}; Ctrl+Z restores the previous text",
+                    edit.description
+                ));
+            }
+            Err(error) => {
+                self.document.harper_action_status =
+                    Some(format!("could not apply suggestion: {error}"));
+            }
+        }
+    }
+
+    fn maybe_autosave(&mut self) {
+        if self.is_scratch() {
+            let analysis_current = self
+                .document
+                .analysis_latest
+                .as_ref()
+                .is_some_and(|analysis| analysis.revision >= self.document.revision);
+            let analysis_pending = self
+                .document
+                .analysis_pending_revision
+                .is_some_and(|revision| revision >= self.document.revision);
+            if analysis_current || analysis_pending {
+                return;
+            }
+
+            let Some(last_edit) = self.document.last_edit else {
+                return;
+            };
+
+            if last_edit.elapsed() >= AUTOSAVE_IDLE {
+                self.queue_analysis_current(self.expansion_candidate_window);
+            }
+            return;
+        }
+
+        if self.document.queued_revision >= self.document.revision {
+            return;
+        }
+
+        let Some(last_edit) = self.document.last_edit else {
+            return;
+        };
+
+        if last_edit.elapsed() >= AUTOSAVE_IDLE {
+            self.queue_current_revision();
+        }
+    }
+
+    fn show_document_tabs(&mut self, ui: &mut egui::Ui) {
+        let Some(workspace) = self.workspace.as_ref() else {
+            return;
+        };
+        let active_index = workspace.active_index();
+        let mut switch_to = None;
+        let mut create = false;
+
+        ui.horizontal(|ui| {
+            ui.strong("documents");
+            ui.separator();
+
+            for index in 0..workspace.len() {
+                let title = workspace.title(index).unwrap_or("document");
+                let path = workspace
+                    .path(index)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "unknown document path".to_owned());
+
+                if ui
+                    .selectable_label(index == active_index, title)
+                    .on_hover_text(path)
+                    .clicked()
+                {
+                    switch_to = Some(index);
+                }
+            }
+
+            if ui
+                .small_button("+")
+                .on_hover_text("Create a new durable Lexwright document and activate its tab.")
+                .clicked()
+            {
+                create = true;
+            }
+
+            if let Some(error) = workspace.error() {
+                ui.separator();
+                ui.weak("workspace error").on_hover_text(format!(
+                    "{error}\nRegistry: {}",
+                    workspace.registry_path().display()
+                ));
+            }
+        });
+
+        if create {
+            self.queue_current_revision();
+            let result = {
+                let workspace = self
+                    .workspace
+                    .as_mut()
+                    .expect("workspace mode always has a workspace");
+                let document = &mut self.document;
+                workspace.create_and_activate(document)
+            };
+
+            if result.is_ok() {
+                self.after_document_switch(ui.ctx());
+            }
+        } else if let Some(target_index) = switch_to
+            && target_index != active_index
+        {
+            self.queue_current_revision();
+            let result = {
+                let workspace = self
+                    .workspace
+                    .as_mut()
+                    .expect("workspace mode always has a workspace");
+                let document = &mut self.document;
+                workspace.switch_to(document, target_index)
+            };
+
+            if result.is_ok() {
+                self.after_document_switch(ui.ctx());
+            }
+        }
+    }
+
+    fn after_document_switch(&mut self, ctx: &egui::Context) {
+        self.focus_editor = true;
+        self.vim_lite.reset();
+
+        // Never carry a document-bound draft/action window across a tab switch.
+        self.rule_editor.open = false;
+        self.lexeme_window = false;
+        self.expansion_candidate_window = false;
+        self.harper_window = false;
+        self.document.pending_external_edit = None;
+        self.document.harper_action_status = None;
+
+        if let Some(name) = self.ruleset_override.clone()
+            && let Err(error) = self.document.buffer.select_expansion_set_runtime(&name)
+        {
+            self.launch_error = Some(format!("could not use ruleset {name:?}: {error}"));
+        }
+
+        // A lazily loaded tab starts with its own analyzer state. If Harper is globally
+        // enabled, explicitly seed this document instead of waiting for its first edit.
+        if self.harper_enabled {
+            self.queue_harper_current();
+        }
+
+        ctx.request_repaint();
+    }
+
+    fn show_save_status(&self, ui: &mut egui::Ui) {
+        if self.is_scratch() {
+            ui.colored_label(egui::Color32::RED, "NOT SAVED");
+        } else if let Some(error) = &self.document.save_error {
+            ui.weak(format!("save error: {error}"));
+        } else if self.document.saved_revision >= self.document.revision {
+            ui.weak("saved");
+        } else if self.document.queued_revision >= self.document.revision {
+            ui.weak("saving");
+        } else {
+            ui.weak("edited");
+        }
+    }
+
+    fn begin_scratch_copy_quit(&mut self, ctx: &egui::Context) {
+        if !self.is_scratch() || self.scratch_copy_quit_pending {
+            return;
+        }
+
+        self.scratch_copy_error = None;
+
+        let result = (|| -> Result<(), String> {
+            let mut child = Command::new("wl-copy")
+                .arg("--type")
+                .arg("text/plain;charset=utf-8")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| {
+                    format!("could not start wl-copy: {error}. Install the wl-clipboard package.")
+                })?;
+
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "wl-copy stdin was unavailable".to_owned())?;
+            stdin
+                .write_all(self.document.buffer.text().as_bytes())
+                .map_err(|error| format!("could not send scratch text to wl-copy: {error}"))?;
+            drop(stdin);
+
+            // wl-copy forks into a long-lived background clipboard owner by default.
+            // Do not use wait_with_output() here: the background child inherits stderr,
+            // which can keep a captured pipe open for the lifetime of the clipboard
+            // selection and freeze the UI. Waiting only for the short-lived parent is
+            // enough to confirm that clipboard ownership was established.
+            let status = child
+                .wait()
+                .map_err(|error| format!("could not wait for wl-copy: {error}"))?;
+
+            if !status.success() {
+                return Err(format!("wl-copy failed with {status}"));
+            }
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.scratch_copy_quit_pending = true;
+                ctx.request_repaint();
+            }
+            Err(error) => {
+                self.scratch_copy_error = Some(error);
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn show_scratch_controls(&mut self, ui: &mut egui::Ui) {
+        let label = egui::RichText::new("SCRATCH · NOT SAVED")
+            .color(egui::Color32::RED)
+            .strong();
+        ui.label(label).on_hover_text(format!(
+            "Ephemeral scratch mode. Text is never written to disk.\nHarper: {}\nRuleset: {:?}\nCtrl+J: copy entire buffer with wl-copy and quit",
+            if self.harper_enabled { "on" } else { "off" },
+            self.document.buffer.expansion_active_set_name(),
+        ));
+
+        if let Some(error) = &self.scratch_copy_error {
+            ui.colored_label(egui::Color32::RED, "COPY FAILED")
+                .on_hover_text(error);
+        }
+
+        if ui
+            .button("Copy + Quit")
+            .on_hover_text(
+                "Send the entire scratch buffer to wl-copy. Lexwright closes only after wl-copy succeeds. Shortcut: Ctrl+J.",
+            )
+            .clicked()
+        {
+            self.begin_scratch_copy_quit(ui.ctx());
+        }
+    }
+
+    fn show_launch_error(&self, ui: &mut egui::Ui) {
+        if let Some(error) = &self.launch_error {
+            ui.colored_label(egui::Color32::RED, "launch error")
+                .on_hover_text(error);
+        }
+    }
+
+    fn show_expansion_status(&mut self, ui: &mut egui::Ui) {
+        let enabled = self.document.buffer.expansions_enabled();
+        let label = if enabled {
+            format!(
+                "expand on · {} rules · {} hits",
+                self.document.buffer.expansion_rule_count(),
+                self.document.buffer.expansion_hits()
+            )
+        } else {
+            format!(
+                "expand off · {} rules",
+                self.document.buffer.expansion_rule_count()
+            )
+        };
+
+        let stats = self.document.buffer.active_expansion_stats();
+        let response = ui.selectable_label(enabled, label).on_hover_text(format!(
+            "Click to toggle.\nActive ruleset: {:?}\nSession hits: {}\nExpanded-word chars typed/output: {}/{} ({:.1}% typed)\nCharacters avoided: {}\nConfig: {}",
+            self.document.buffer.expansion_active_set_name(),
+            stats.hits,
+            stats.trigger_chars,
+            stats.output_chars,
+            stats.typed_percent(),
+            stats.avoided_chars(),
+            self.document.buffer.expansion_config_path().display()
+        ));
+
+        if response.clicked() {
+            self.document.buffer.set_expansions_enabled(!enabled);
+            self.focus_editor = true;
+        }
+
+        if ui.small_button("rules").clicked() {
+            self.rule_editor.load_from(&self.document.buffer);
+        }
+
+        if let Some(error) = self.document.buffer.expansion_config_error() {
+            ui.separator();
+            ui.weak("expansion config error").on_hover_text(error);
+        }
+    }
+
+    fn show_rule_editor(&mut self, ctx: &egui::Context) {
+        if !self.rule_editor.open {
+            return;
+        }
+
+        let config_path = self
+            .document
+            .buffer
+            .expansion_config_path()
+            .display()
+            .to_string();
+        let set_names = self.document.buffer.expansion_set_names();
+        let set_stats = self.document.buffer.expansion_stats_by_set();
+        let active_set = self.document.buffer.expansion_active_set_name().to_owned();
+        let mut requested_set = active_set.clone();
+        let mut open = self.rule_editor.open;
+        let mut save_activate = false;
+        let mut discard_draft = false;
+        let mut reset_stats = false;
+        let mut export_report = false;
+        let mut rename_set = false;
+        let mut create_set = false;
+        let mut delete_set = false;
+
+        egui::Window::new("Expansion rules")
+            .open(&mut open)
+            .default_width(560.0)
+            .min_width(280.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak("config");
+                    ui.monospace("expansions.tsv").on_hover_text(&config_path);
+                });
+                ui.add_space(4.0);
+
+                egui::CollapsingHeader::new("Ruleset")
+                    .id_salt("lexwright_rules_ruleset_section")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+
+                    egui::ComboBox::from_id_salt("lexwright_expansion_ruleset")
+                        .selected_text(&requested_set)
+                        .show_ui(ui, |ui| {
+                            for name in &set_names {
+                                ui.selectable_value(
+                                    &mut requested_set,
+                                    name.clone(),
+                                    name,
+                                );
+                            }
+                        });
+
+                    ui.separator();
+                    ui.label("new");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.new_set_name)
+                            .desired_width(130.0)
+                            .hint_text("experiment"),
+                    );
+
+                    if ui
+                        .small_button("Clone active")
+                        .on_hover_text(
+                            "Create a new named ruleset from the currently saved active set and switch to it. Save & activate draft edits first if you want them included.",
+                        )
+                        .clicked()
+                    {
+                        create_set = true;
+                    }
+
+                    if set_names.len() > 1
+                        && ui
+                            .small_button("Delete active")
+                            .on_hover_text(
+                                "Delete the active ruleset. Lexwright will activate the first remaining set.",
+                            )
+                            .clicked()
+                    {
+                        delete_set = true;
+                    }
+                });
+
+                ui.weak(
+                    "Choosing another ruleset activates it immediately and discards unapplied draft edits in this window.",
+                );
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("rename active");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.rename_set_name)
+                            .desired_width(160.0),
+                    );
+                    if ui
+                        .small_button("Rename")
+                        .on_hover_text(
+                            "Rename the saved active profile. Draft rules and note stay in this window; session telemetry follows the renamed profile.",
+                        )
+                        .clicked()
+                    {
+                        rename_set = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("note");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.note)
+                            .desired_width(480.0)
+                            .hint_text("What is this profile testing?"),
+                    );
+                });
+                ui.weak(
+                    "The note is durable experiment metadata. Save & activate persists note and draft rules together.",
+                );
+
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut self.rule_editor.starter_enabled,
+                    "Enable the 10 starter rules",
+                )
+                .on_hover_text(
+                    "Starter-rule enablement belongs to this ruleset. User rules override starter rules with the same trigger.",
+                );
+                    });
+
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new("Add rule")
+                    .id_salt("lexwright_rules_add_section")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("trigger");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.new_trigger)
+                            .desired_width(100.0),
+                    );
+                    ui.label("replacement");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_editor.new_replacement)
+                            .desired_width(240.0),
+                    );
+                    ui.checkbox(
+                        &mut self.rule_editor.new_allow_capitalized,
+                        "Caps",
+                    )
+                    .on_hover_text(
+                        "Also match only the title-case trigger form: first letter uppercase, remaining letters lowercase. The replacement's first letter is capitalized too.",
+                    );
+
+                    if ui.button("Add").clicked() {
+                        if self.rule_editor.new_trigger.is_empty() {
+                            self.rule_editor.status =
+                                Some("trigger cannot be empty".to_owned());
+                        } else {
+                            self.rule_editor.rules.push(ExpansionRule {
+                                trigger: std::mem::take(&mut self.rule_editor.new_trigger),
+                                replacement: std::mem::take(
+                                    &mut self.rule_editor.new_replacement,
+                                ),
+                                allow_capitalized: std::mem::take(
+                                    &mut self.rule_editor.new_allow_capitalized,
+                                ),
+                            });
+                            self.rule_editor.status = Some(
+                                "draft rule added; Save & activate to compile and persist".to_owned(),
+                            );
+                        }
+                    }
+                });
+                    });
+
+                ui.add_space(4.0);
+                let rules_heading = format!("Rules ({})", self.rule_editor.rules.len());
+                egui::CollapsingHeader::new(rules_heading)
+                    .id_salt("lexwright_rules_list_section")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                let mut remove_index = None;
+                egui::ScrollArea::vertical()
+                    .max_height(340.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("lexwright_expansion_rule_grid")
+                            .num_columns(6)
+                            .striped(true)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("trigger");
+                                ui.strong("replacement");
+                                ui.strong("Caps").on_hover_text(
+                                    "When checked, a lowercase trigger such as bc also accepts Bc and emits a replacement with its first letter capitalized. BC and mixed-case forms still do not match.",
+                                );
+                                ui.strong("hits").on_hover_text(
+                                    "Successful expansions for this saved trigger in the current session.",
+                                );
+                                ui.strong("avoided").on_hover_text(
+                                    "Replacement characters minus trigger characters across successful hits.",
+                                );
+                                ui.strong("");
+                                ui.end_row();
+
+                                for (index, rule) in
+                                    self.rule_editor.rules.iter_mut().enumerate()
+                                {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut rule.trigger)
+                                            .desired_width(120.0),
+                                    );
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut rule.replacement)
+                                            .desired_width(300.0),
+                                    );
+                                    ui.checkbox(&mut rule.allow_capitalized, "");
+
+                                    let rule_stats =
+                                        self.document.buffer.active_expansion_rule_stats(&rule.trigger);
+                                    ui.monospace(rule_stats.hits.to_string());
+                                    ui.monospace(rule_stats.avoided_chars().to_string());
+
+                                    if ui.small_button("remove").clicked() {
+                                        remove_index = Some(index);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                if let Some(index) = remove_index {
+                    self.rule_editor.rules.remove(index);
+                    self.rule_editor.status =
+                        Some("draft rule removed; Save & activate to persist".to_owned());
+                }
+                    });
+
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Save & activate").clicked() {
+                        save_activate = true;
+                    }
+
+                    if ui.button("Discard draft").clicked() {
+                        discard_draft = true;
+                    }
+
+                    let stats = self.document.buffer.active_expansion_stats();
+                    ui.weak(format!(
+                        "{:?} · {} draft user rules · starter {} · session {} hits / {} chars avoided",
+                        self.rule_editor.active_set,
+                        self.rule_editor.rules.len(),
+                        if self.rule_editor.starter_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        },
+                        stats.hits,
+                        stats.avoided_chars(),
+                    ));
+                });
+
+                if let Some(status) = &self.rule_editor.status {
+                    ui.add_space(4.0);
+                    ui.weak(status);
+                }
+
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new("Session comparison")
+                    .id_salt("lexwright_rules_session_section")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .small_button("Reset active stats")
+                        .on_hover_text(
+                            "Clear only the active ruleset's runtime measurements. Rules and saved configuration are unchanged.",
+                        )
+                        .clicked()
+                    {
+                        reset_stats = true;
+                    }
+
+                    if ui
+                        .small_button("Export report")
+                        .on_hover_text(
+                            "Write a Markdown snapshot of the current ruleset comparison and active per-rule stats under XDG state.",
+                        )
+                        .clicked()
+                    {
+                        export_report = true;
+                    }
+                });
+                ui.weak(
+                    "Runtime-only measurements for this Lexwright session. Saving a changed ruleset resets that set's stats so old and new definitions are not mixed.",
+                );
+                egui::Grid::new("lexwright_expansion_ruleset_stats")
+                    .num_columns(5)
+                    .striped(true)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.strong("ruleset");
+                        ui.strong("hits");
+                        ui.strong("typed / output");
+                        ui.strong("typed %");
+                        ui.strong("avoided");
+                        ui.end_row();
+
+                        for (name, stats) in &set_stats {
+                            if name == &active_set {
+                                ui.strong(format!("{name} · active"));
+                            } else {
+                                ui.label(name);
+                            }
+                            ui.monospace(stats.hits.to_string());
+                            ui.monospace(format!(
+                                "{} / {}",
+                                stats.trigger_chars, stats.output_chars
+                            ));
+                            ui.monospace(format!("{:.1}%", stats.typed_percent()));
+                            ui.monospace(stats.avoided_chars().to_string());
+                            ui.end_row();
+                        }
+                    });
+
+                ui.add_space(4.0);
+                ui.weak(
+                    "Save & activate validates, writes expansions.tsv, and recompiles the active trie. Typing still sees one precompiled active trie.",
+                );
+                    });
+            });
+
+        self.rule_editor.open = open;
+
+        if requested_set != active_set {
+            match self.document.buffer.select_expansion_set(&requested_set) {
+                Ok(()) => {
+                    self.rule_editor.load_from(&self.document.buffer);
+                    self.rule_editor.status = Some(format!("activated ruleset {requested_set:?}"));
+                }
+                Err(error) => {
+                    self.rule_editor.status = Some(format!("cannot activate ruleset: {error}"));
+                }
+            }
+            return;
+        }
+
+        if rename_set {
+            let name = self.rule_editor.rename_set_name.trim().to_owned();
+            if name.is_empty() {
+                self.rule_editor.status = Some("ruleset name cannot be empty".to_owned());
+            } else {
+                match self.document.buffer.rename_active_expansion_set(&name) {
+                    Ok((previous, current)) => {
+                        self.rule_editor.active_set = current.clone();
+                        self.rule_editor.rename_set_name = current.clone();
+                        self.rule_editor.status =
+                            Some(format!("renamed ruleset {previous:?} to {current:?}"));
+                    }
+                    Err(error) => {
+                        self.rule_editor.status = Some(format!("cannot rename ruleset: {error}"));
+                    }
+                }
+            }
+            return;
+        }
+
+        if create_set {
+            let name = self.rule_editor.new_set_name.trim().to_owned();
+            if name.is_empty() {
+                self.rule_editor.status = Some("new ruleset name cannot be empty".to_owned());
+            } else {
+                match self.document.buffer.create_expansion_set_from_active(&name) {
+                    Ok(()) => {
+                        self.rule_editor.load_from(&self.document.buffer);
+                        self.rule_editor.new_set_name.clear();
+                        self.rule_editor.status =
+                            Some(format!("created and activated ruleset {name:?}"));
+                    }
+                    Err(error) => {
+                        self.rule_editor.status = Some(format!("cannot create ruleset: {error}"));
+                    }
+                }
+            }
+            return;
+        }
+
+        if delete_set {
+            match self.document.buffer.delete_active_expansion_set() {
+                Ok(removed) => {
+                    self.rule_editor.load_from(&self.document.buffer);
+                    self.rule_editor.status = Some(format!(
+                        "deleted ruleset {removed:?}; active ruleset is now {:?}",
+                        self.document.buffer.expansion_active_set_name()
+                    ));
+                }
+                Err(error) => {
+                    self.rule_editor.status = Some(format!("cannot delete ruleset: {error}"));
+                }
+            }
+            return;
+        }
+
+        if export_report {
+            match export_expansion_report(&self.document.buffer) {
+                Ok(path) => {
+                    self.rule_editor.status =
+                        Some(format!("exported session report to {}", path.display()));
+                }
+                Err(error) => {
+                    self.rule_editor.status = Some(format!("cannot export report: {error}"));
+                }
+            }
+        }
+
+        if reset_stats {
+            self.document.buffer.reset_active_expansion_stats();
+            self.rule_editor.status = Some(format!(
+                "reset session stats for {:?}",
+                self.document.buffer.expansion_active_set_name()
+            ));
+        }
+
+        if discard_draft {
+            self.rule_editor.load_from(&self.document.buffer);
+            self.rule_editor.status =
+                Some("discarded draft; reloaded saved active rules".to_owned());
+        }
+
+        if save_activate {
+            let note = self.rule_editor.note.clone();
+            let starter_enabled = self.rule_editor.starter_enabled;
+            let rules = self.rule_editor.rules.clone();
+
+            match self
+                .document
+                .buffer
+                .apply_expansion_config(note, starter_enabled, rules)
+            {
+                Ok(()) => {
+                    self.rule_editor.active_set =
+                        self.document.buffer.expansion_active_set_name().to_owned();
+                    self.rule_editor.status = Some(format!(
+                        "saved {:?}, compiled {} active rules, and reset its session stats",
+                        self.document.buffer.expansion_active_set_name(),
+                        self.document.buffer.expansion_rule_count()
+                    ));
+                }
+                Err(error) => {
+                    self.rule_editor.status = Some(format!("cannot save & activate: {error}"));
+                }
+            }
+        }
+    }
+
+    fn show_analysis_status(&self, ui: &mut egui::Ui) {
+        if let Some(error) = &self.document.analysis_error {
+            ui.weak("analysis error").on_hover_text(error);
+            return;
+        }
+
+        let Some(analysis) = self.document.analysis_latest.as_ref() else {
+            ui.weak("words …");
+            return;
+        };
+
+        let stale = analysis.revision < self.document.revision;
+        let label = format!("words {}", analysis.words);
+
+        ui.weak(label).on_hover_text(format!(
+            "revision: {}{}\nstatus: {}\nwords: {}\ncharacters: {}\nbytes: {}\nlines: {}\nparagraphs: {}\nanalysis CPU: {}",
+            analysis.revision,
+            if stale { " (stale)" } else { "" },
+            if stale { "analyzing" } else { "current" },
+            analysis.words,
+            analysis.chars,
+            analysis.bytes,
+            analysis.lines,
+            analysis.paragraphs,
+            format_ns(analysis.elapsed.as_nanos().min(u64::MAX as u128) as u64),
+        ));
+    }
+
+    fn show_structure_status(&mut self, ui: &mut egui::Ui) {
+        let current = self
+            .document
+            .analysis_latest
+            .as_ref()
+            .filter(|analysis| analysis.revision == self.document.revision);
+
+        let label = match (self.structure_overlay, current.is_some()) {
+            (false, _) => "structure off",
+            (true, true) => "structure on",
+            (true, false) => "structure waiting",
+        };
+
+        let mut tooltip = String::from(
+            "Heuristic English structure overlay. Closed-class categories are lexical matches; open-class *-like categories use conservative suffix/lexicon heuristics. This is not yet a statistical POS tagger.\n",
+        );
+
+        if let Some(analysis) = current {
+            for class in LexicalClass::ALL {
+                tooltip.push_str(class.label());
+                tooltip.push_str(": ");
+                tooltip.push_str(&analysis.lexical_counts.get(class).to_string());
+                tooltip.push('\n');
+            }
+            tooltip.push_str("unclassified: ");
+            tooltip.push_str(&analysis.lexical_counts.unclassified.to_string());
+            tooltip.push_str("\nclassified total: ");
+            tooltip.push_str(&analysis.lexical_counts.classified_total().to_string());
+        } else {
+            tooltip.push_str("Waiting for analysis of the current revision.");
+        }
+
+        let response = ui
+            .selectable_label(self.structure_overlay, label)
+            .on_hover_text(tooltip);
+
+        if response.clicked() {
+            self.structure_overlay = !self.structure_overlay;
+            if self.structure_overlay {
+                self.morphology_overlay = false;
+            }
+            self.focus_editor = true;
+        }
+    }
+
+    fn show_morphology_status(&mut self, ui: &mut egui::Ui) {
+        let current = self
+            .document
+            .analysis_latest
+            .as_ref()
+            .filter(|analysis| analysis.revision == self.document.revision);
+
+        let label = match (self.morphology_overlay, current.is_some()) {
+            (false, _) => "morph off",
+            (true, true) => "morph on",
+            (true, false) => "morph waiting",
+        };
+
+        let tooltip = if let Some(analysis) = current {
+            format!(
+                "Heuristic orthographic morphology, not lemmatization.\ndecomposed words: {}\nprefixes: {}\nsuffixes: {}\n\nPrefix/stem/suffix colors show surface segmentation. Spelling alternations such as happiness → happy and running → run are not normalized yet.",
+                analysis.morph_counts.decomposed_words,
+                analysis.morph_counts.prefixes,
+                analysis.morph_counts.suffixes,
+            )
+        } else {
+            "Heuristic orthographic morphology. Waiting for analysis of the current revision."
+                .to_owned()
+        };
+
+        let response = ui
+            .selectable_label(self.morphology_overlay, label)
+            .on_hover_text(tooltip);
+
+        if response.clicked() {
+            self.morphology_overlay = !self.morphology_overlay;
+            if self.morphology_overlay {
+                self.structure_overlay = false;
+            }
+            self.focus_editor = true;
+        }
+    }
+
+    fn show_lexeme_status(&mut self, ui: &mut egui::Ui) {
+        let current = self
+            .document
+            .analysis_latest
+            .as_ref()
+            .filter(|analysis| analysis.revision == self.document.revision);
+
+        let count = current.map_or(0, |analysis| analysis.lexeme_candidates.len());
+        let label = if current.is_some() {
+            format!("lexemes {count}")
+        } else {
+            "lexemes …".to_owned()
+        };
+
+        let response = ui
+            .small_button(label)
+            .on_hover_text(
+                "Open conservative lexeme candidates derived from the current morphology pass. Candidates never rewrite the ledger.",
+            );
+
+        if response.clicked() {
+            self.lexeme_window = !self.lexeme_window;
+        }
+    }
+
+    fn show_lexeme_window(&mut self, ctx: &egui::Context) {
+        if !self.lexeme_window {
+            return;
+        }
+
+        let mut open = self.lexeme_window;
+
+        egui::Window::new("Lexeme candidates")
+            .open(&mut open)
+            .default_width(540.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.weak(
+                    "Derived candidates only. The surface bytes remain canonical; normalization is observational.",
+                );
+                ui.add_space(6.0);
+
+                let Some(analysis) = self.document.analysis_latest
+                    .as_ref()
+                    .filter(|analysis| analysis.revision == self.document.revision)
+                else {
+                    ui.weak("Waiting for analysis of the current revision.");
+                    return;
+                };
+
+                if analysis.lexeme_candidates.is_empty() {
+                    ui.weak("No morphology-derived lexeme candidates in this revision.");
+                    return;
+                }
+
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("lexwright_lexeme_grid")
+                            .num_columns(4)
+                            .striped(true)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("word");
+                                ui.strong("surface stem");
+                                ui.strong("lexeme");
+                                ui.strong("rule");
+                                ui.end_row();
+
+                                for candidate in analysis.lexeme_candidates.iter() {
+                                    let text = self.document.buffer.text();
+
+                                    let word = text
+                                        .get(candidate.word_start..candidate.word_end)
+                                        .unwrap_or("?");
+                                    let stem = text
+                                        .get(candidate.stem_start..candidate.stem_end)
+                                        .unwrap_or("?");
+
+                                    ui.monospace(word);
+                                    ui.monospace(stem);
+                                    ui.monospace(candidate.lexeme.as_ref());
+                                    ui.weak(candidate.rule.label());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+
+        self.lexeme_window = open;
+    }
+
+    fn show_expansion_candidate_status(&mut self, ui: &mut egui::Ui) {
+        let current = self
+            .document
+            .analysis_latest
+            .as_ref()
+            .filter(|analysis| analysis.revision == self.document.revision);
+        let mined = current.is_some_and(|analysis| analysis.expansion_candidates_mined);
+        let count = current
+            .filter(|analysis| analysis.expansion_candidates_mined)
+            .map_or(0, |analysis| analysis.expansion_candidates.len());
+
+        let label = if mined {
+            format!("candidates {count}")
+        } else {
+            "candidates".to_owned()
+        };
+
+        if ui
+            .small_button(label)
+            .on_hover_text(
+                "Mine repeated words and 2-4 word phrases for potential expansion rules. Mining is observational and runs only when this window is requested.",
+            )
+            .clicked()
+        {
+            self.expansion_candidate_window = !self.expansion_candidate_window;
+            if self.expansion_candidate_window && !mined {
+                self.queue_analysis_current(true);
+            }
+        }
+    }
+
+    fn show_expansion_candidate_window(&mut self, ctx: &egui::Context) {
+        if !self.expansion_candidate_window {
+            return;
+        }
+
+        let mut open = self.expansion_candidate_window;
+        let mut promote = None::<(String, String)>;
+
+        egui::Window::new("Expansion candidates")
+            .open(&mut open)
+            .default_width(660.0)
+            .min_width(300.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.weak(
+                    "Observational only. Candidates are repeated 1-4 word patterns ranked by estimated character savings. Nothing is added until you explicitly draft it.",
+                );
+                ui.add_space(6.0);
+
+                let Some(analysis) = self
+                    .document
+                    .analysis_latest
+                    .as_ref()
+                    .filter(|analysis| analysis.revision == self.document.revision)
+                else {
+                    ui.weak("Waiting for analysis of the current revision.");
+                    return;
+                };
+
+                if !analysis.expansion_candidates_mined {
+                    ui.weak("Mining candidates in the background...");
+                    return;
+                }
+
+                if analysis.expansion_candidates.is_empty() {
+                    ui.weak(
+                        "No repeated word or short-phrase candidates cleared the current savings threshold.",
+                    );
+                    return;
+                }
+
+                egui::ScrollArea::both()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("lexwright_expansion_candidate_grid")
+                            .num_columns(7)
+                            .striped(true)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.strong("text");
+                                ui.strong("uses");
+                                ui.strong("words");
+                                ui.strong("trigger");
+                                ui.strong("save");
+                                ui.strong("risk");
+                                ui.strong("");
+                                ui.end_row();
+
+                                for candidate in analysis.expansion_candidates.iter() {
+                                    let trigger_used = self
+                                        .document
+                                        .buffer
+                                        .expansion_has_trigger(candidate.proposed_trigger.as_ref());
+                                    let replacement_covered = self
+                                        .document
+                                        .buffer
+                                        .expansion_has_replacement(candidate.text.as_ref());
+
+                                    ui.monospace(candidate.text.as_ref());
+                                    ui.monospace(candidate.occurrences.to_string());
+                                    ui.monospace(candidate.word_count.to_string());
+                                    ui.monospace(candidate.proposed_trigger.as_ref());
+                                    ui.monospace(candidate.estimated_avoided_chars.to_string());
+
+                                    if replacement_covered {
+                                        ui.weak("covered");
+                                    } else if trigger_used {
+                                        ui.weak("trigger used");
+                                    } else {
+                                        ui.weak(candidate.risk().label());
+                                    }
+
+                                    let can_promote = !trigger_used && !replacement_covered;
+                                    ui.add_enabled_ui(can_promote, |ui| {
+                                        if ui
+                                            .small_button("draft")
+                                            .on_hover_text(
+                                                "Add this candidate to the current rules-window draft. You still choose Save & activate explicitly.",
+                                            )
+                                            .clicked()
+                                        {
+                                            promote = Some((
+                                                candidate.proposed_trigger.to_string(),
+                                                candidate.text.to_string(),
+                                            ));
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                ui.add_space(4.0);
+                ui.weak(
+                    "Risk is heuristic: 2-character triggers are medium risk; 3+ are low unless multiple candidates propose the same trigger. Existing live triggers and already-covered replacements are reported separately.",
+                );
+            });
+
+        self.expansion_candidate_window = open;
+
+        if let Some((trigger, replacement)) = promote {
+            if !self.rule_editor.open {
+                self.rule_editor.load_from(&self.document.buffer);
+            }
+
+            if self
+                .rule_editor
+                .rules
+                .iter()
+                .any(|rule| rule.trigger == trigger)
+            {
+                self.rule_editor.status =
+                    Some(format!("draft already contains trigger {trigger:?}"));
+            } else {
+                self.rule_editor.rules.push(ExpansionRule {
+                    trigger: trigger.clone(),
+                    replacement: replacement.clone(),
+                    allow_capitalized: false,
+                });
+                self.rule_editor.status = Some(format!(
+                    "drafted {trigger:?} -> {replacement:?}; review Caps if wanted, then Save & activate"
+                ));
+            }
+        }
+    }
+
+    fn show_harper_status(&mut self, ui: &mut egui::Ui) {
+        let current_display = self.harper_enabled
+            && self.document.harper_display_revision == Some(self.document.revision);
+
+        let label = if !self.harper_enabled {
+            "harper off".to_owned()
+        } else if current_display {
+            format!("harper {}", self.document.harper_display_diagnostics.len())
+        } else if self.document.harper_pending_revision.is_some() {
+            "harper …".to_owned()
+        } else {
+            "harper on".to_owned()
+        };
+
+        let tooltip = if let Some(error) = &self.document.harper_error {
+            format!("Harper error: {error}\nClick to open diagnostics/settings.")
+        } else if !self.harper_enabled {
+            "Harper is disabled and consumes no analysis work. Click to open diagnostics/settings."
+                .to_owned()
+        } else if let Some(result) = self.document.harper_latest.as_ref() {
+            format!(
+                "Harper 2.11.0 · American English\nlatest analyzed revision: {}\nlive visible diagnostics: {}{}\nHarper CPU: {}\nwork: {} / {} bytes{}\n\nUnchanged diagnostics stay visible across edits; only the local dirty neighborhood is invalidated.",
+                result.revision,
+                if current_display {
+                    self.document.harper_display_diagnostics.len()
+                } else {
+                    0
+                },
+                if result.truncated {
+                    " (source result capped)"
+                } else {
+                    ""
+                },
+                format_ns(result.elapsed.as_nanos().min(u64::MAX as u128) as u64),
+                result.linted_bytes,
+                result.total_bytes,
+                if result.incremental {
+                    " incremental"
+                } else {
+                    " full"
+                },
+            )
+        } else {
+            "Harper is waiting for its first analysis. Click to open diagnostics/settings."
+                .to_owned()
+        };
+
+        if ui.small_button(label).on_hover_text(tooltip).clicked() {
+            self.harper_window = !self.harper_window;
+        }
+    }
+
+    fn show_harper_window(&mut self, ctx: &egui::Context) {
+        if !self.harper_window {
+            return;
+        }
+
+        let mut open = self.harper_window;
+        let mut requested_edit = None;
+
+        egui::Window::new("Harper diagnostics")
+            .open(&mut open)
+            .default_width(680.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                let was_enabled = self.harper_enabled;
+                ui.checkbox(
+                    &mut self.harper_enabled,
+                    "Enable background Harper diagnostics",
+                )
+                .on_hover_text(
+                    "When disabled, Lexwright does not initialize Harper or send it document snapshots.",
+                );
+
+                if self.harper_enabled && !was_enabled {
+                    self.queue_harper_current();
+                } else if !self.harper_enabled && was_enabled {
+                    self.document.harper_pending_revision = None;
+                    self.document.harper_error = None;
+                    self.document.harper_display_revision = None;
+                    self.document.harper_display_diagnostics = Arc::from([]);
+                }
+
+                ui.weak(
+                    "Suggestions apply as revision-checked editor mutations and participate in Ctrl+Z.",
+                );
+
+                if let Some(status) = &self.document.harper_action_status {
+                    ui.add_space(4.0);
+                    ui.weak(status);
+                }
+
+                ui.add_space(6.0);
+
+                if !self.harper_enabled {
+                    ui.weak("Harper is off.");
+                    return;
+                }
+
+                if self.document.harper_display_revision != Some(self.document.revision) {
+                    ui.weak("Waiting for Harper to establish live diagnostics for this revision.");
+                    return;
+                }
+
+                if self.document.harper_display_diagnostics.is_empty() {
+                    ui.label("No visible Harper diagnostics for this revision.");
+                    return;
+                }
+
+                egui::ScrollArea::vertical()
+                    .max_height(480.0)
+                    .show(ui, |ui| {
+                        for diagnostic in self.document.harper_display_diagnostics.iter() {
+                            let source = self.document.buffer
+                                .text()
+                                .get(diagnostic.start_byte..diagnostic.end_byte)
+                                .unwrap_or("?");
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong(diagnostic.kind.as_ref());
+                                ui.monospace(source);
+                                ui.weak(format!("priority {}", diagnostic.priority));
+                            });
+                            ui.label(diagnostic.message.as_ref());
+
+                            if !diagnostic.suggestions.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.weak("suggestions:");
+
+                                    for suggestion in diagnostic.suggestions.iter() {
+                                        let button_label = format!("apply {}", suggestion.label());
+                                        if ui.small_button(button_label).clicked() {
+                                            let (start_byte, end_byte, replacement) =
+                                                match suggestion {
+                                                    HarperSuggestion::ReplaceWith(text) => (
+                                                        diagnostic.start_byte,
+                                                        diagnostic.end_byte,
+                                                        text.to_string(),
+                                                    ),
+                                                    HarperSuggestion::InsertAfter(text) => (
+                                                        diagnostic.end_byte,
+                                                        diagnostic.end_byte,
+                                                        text.to_string(),
+                                                    ),
+                                                    HarperSuggestion::Remove => (
+                                                        diagnostic.start_byte,
+                                                        diagnostic.end_byte,
+                                                        String::new(),
+                                                    ),
+                                                };
+
+                                            requested_edit = Some(PendingExternalEdit {
+                                                expected_revision: self.document.revision,
+                                                start_byte,
+                                                end_byte,
+                                                replacement,
+                                                description: suggestion.label(),
+                                            });
+                                        }
+                                    }
+                                });
+                            }
+
+                            ui.separator();
+                        }
+                    });
+            });
+
+        self.harper_window = open;
+
+        if let Some(edit) = requested_edit {
+            self.document.pending_external_edit = Some(edit);
+        }
+    }
+
+    fn show_navigation_status(&mut self, ui: &mut egui::Ui) {
+        let enabled = self.editor_settings.vim_lite;
+        let mode = self.vim_lite.mode();
+        let label = if enabled { mode.label() } else { "VIM OFF" };
+        let tooltip = if enabled {
+            "Vim-lite enabled. Ctrl+i toggles INSERT/NAV while the editor has focus.\nNAV movement: h/j/k/l, w/b, 0/$, gg/G.\nNAV is non-mutating. Click this indicator to toggle mode; disable Vim-lite under cursor settings."
+        } else {
+            "Vim-lite is disabled. Click to enable it immediately.\nAfter enabling, Ctrl+i toggles INSERT/NAV while the editor has focus."
+        };
+
+        if ui.small_button(label).on_hover_text(tooltip).clicked() {
+            if enabled {
+                self.vim_lite.toggle_mode();
+            } else {
+                let mut next = self.editor_settings.clone();
+                next.vim_lite = true;
+                match settings::save_preserving_display_settings(&self.editor_settings_path, &next)
+                {
+                    Ok(merged) => {
+                        self.editor_settings = merged;
+                        self.editor_settings_error = None;
+                        self.vim_lite.reset();
+                    }
+                    Err(error) => {
+                        self.editor_settings_error = Some(error);
+                    }
+                }
+            }
+            self.focus_editor = true;
+        }
+    }
+
+    fn show_expansion_status_compact(&mut self, ui: &mut egui::Ui) {
+        let enabled = self.document.buffer.expansions_enabled();
+        let stats = self.document.buffer.active_expansion_stats();
+        let label = if enabled { "expand on" } else { "expand off" };
+        let response = ui.selectable_label(enabled, label).on_hover_text(format!(
+            "Click to toggle.\nActive ruleset: {:?}\nCompiled rules: {}\nSession hits: {}\nCharacters avoided: {}\nConfig: {}",
+            self.document.buffer.expansion_active_set_name(),
+            self.document.buffer.expansion_rule_count(),
+            stats.hits,
+            stats.avoided_chars(),
+            self.document.buffer.expansion_config_path().display()
+        ));
+
+        if response.clicked() {
+            self.document.buffer.set_expansions_enabled(!enabled);
+            self.focus_editor = true;
+        }
+
+        if ui.small_button("rules").clicked() {
+            self.rule_editor.load_from(&self.document.buffer);
+        }
+    }
+
+    fn show_cursor_status(&mut self, ui: &mut egui::Ui) {
+        let tooltip = if let Some(error) = &self.editor_settings_error {
+            format!(
+                "Editor settings error: {error}\nUsing current in-memory settings.\nConfig: {}",
+                self.editor_settings_path.display()
+            )
+        } else {
+            format!(
+                "Editor font: {:.1}px\nUI zoom: {:.1}x\nCursor width: {:.1}px\nBlink: {}{}\nVim-lite: {}\nConfig: {}\n\nClick to configure.",
+                self.editor_settings.font_size,
+                self.editor_settings.zoom_factor,
+                self.editor_settings.cursor_width,
+                if self.editor_settings.cursor_blink {
+                    "on"
+                } else {
+                    "off"
+                },
+                if self.editor_settings.cursor_blink {
+                    format!(
+                        " ({:.2}s on / {:.2}s off)",
+                        self.editor_settings.cursor_on_seconds,
+                        self.editor_settings.cursor_off_seconds
+                    )
+                } else {
+                    String::new()
+                },
+                if self.editor_settings.vim_lite {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                self.editor_settings_path.display()
+            )
+        };
+
+        if ui.small_button("cursor").on_hover_text(tooltip).clicked() {
+            self.editor_settings_editor.load_from(&self.editor_settings);
+        }
+    }
+
+    fn show_status_window(&mut self, ctx: &egui::Context) {
+        if !self.status_window {
+            return;
+        }
+
+        let mut open = self.status_window;
+        egui::Window::new("Lexwright status")
+            .open(&mut open)
+            .default_width(420.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    self.show_analysis_status(ui);
+                    ui.separator();
+                    self.show_structure_status(ui);
+                    ui.separator();
+                    self.show_morphology_status(ui);
+                    ui.separator();
+                    self.show_lexeme_status(ui);
+                    ui.separator();
+                    self.show_expansion_candidate_status(ui);
+                    ui.separator();
+                    self.show_harper_status(ui);
+                    ui.separator();
+                    self.show_perf_status(ui);
+                });
+                ui.separator();
+                ui.weak(&self.document.path_label);
+            });
+        self.status_window = open;
+    }
+
+    fn show_editor_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.editor_settings_editor.open {
+            return;
+        }
+
+        let mut open = self.editor_settings_editor.open;
+        let mut save = false;
+        let mut discard = false;
+
+        egui::Window::new("Editor ergonomics")
+            .open(&mut open)
+            .default_width(430.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.weak(self.editor_settings_path.display().to_string());
+                ui.add_space(6.0);
+
+                ui.strong("Text");
+                let mut font_size = self.editor_settings.font_size;
+                let font_response = ui.add(
+                    egui::Slider::new(&mut font_size, 8.0..=48.0)
+                        .text("font size (px)")
+                        .fixed_decimals(1),
+                );
+                if font_response.changed() {
+                    let previous = self.editor_settings.font_size;
+                    self.editor_settings.font_size = font_size;
+
+                    match settings::save_font_size(&self.editor_settings_path, font_size) {
+                        Ok(merged) => {
+                            self.editor_settings = merged;
+                            self.editor_settings_editor.draft.font_size =
+                                self.editor_settings.font_size;
+                            self.editor_settings_error = None;
+                            self.editor_settings_editor.status =
+                                Some(format!("saved font size {:.1}px", font_size));
+                        }
+                        Err(error) => {
+                            self.editor_settings.font_size = previous;
+                            self.editor_settings_editor.draft.font_size = previous;
+                            self.editor_settings_error = Some(error.clone());
+                            self.editor_settings_editor.status =
+                                Some(format!("cannot save font size: {error}"));
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.strong("Cursor");
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.editor_settings_editor.draft.cursor_width,
+                        0.5..=12.0,
+                    )
+                    .text("width (px)")
+                    .fixed_decimals(1),
+                );
+
+                ui.checkbox(
+                    &mut self.editor_settings_editor.draft.cursor_blink,
+                    "Blink cursor",
+                );
+
+                if self.editor_settings_editor.draft.cursor_blink {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.editor_settings_editor.draft.cursor_on_seconds,
+                            0.05..=3.0,
+                        )
+                        .text("visible seconds")
+                        .fixed_decimals(2),
+                    );
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.editor_settings_editor.draft.cursor_off_seconds,
+                            0.05..=3.0,
+                        )
+                        .text("hidden seconds")
+                        .fixed_decimals(2),
+                    );
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.strong("Navigation");
+                ui.checkbox(
+                    &mut self.editor_settings_editor.draft.vim_lite,
+                    "Enable Vim-lite navigation",
+                )
+                .on_hover_text(
+                    "Prepares the editor for a deliberately small navigation mode. No registers, macros, operators, command line, or full Vim emulation.",
+                );
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save settings").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Discard draft").clicked() {
+                        discard = true;
+                    }
+                });
+
+                if let Some(status) = &self.editor_settings_editor.status {
+                    ui.add_space(4.0);
+                    ui.weak(status);
+                }
+
+                ui.add_space(4.0);
+                ui.weak(
+                    "The slider changes the editor text font. Ctrl++ / Ctrl+=, Ctrl+-, and Ctrl+0 use egui's native whole-app zoom; Lexwright persists that zoom after a brief idle. Cursor/navigation settings are applied only when Save settings is pressed.",
+                );
+            });
+
+        self.editor_settings_editor.open = open;
+
+        if discard {
+            self.editor_settings_editor.load_from(&self.editor_settings);
+            self.editor_settings_editor.status =
+                Some("discarded draft; reloaded saved settings".to_owned());
+        }
+
+        if save {
+            let draft = self.editor_settings_editor.draft.clone();
+            match settings::save_preserving_display_settings(&self.editor_settings_path, &draft) {
+                Ok(merged) => {
+                    self.editor_settings = merged;
+                    if !self.editor_settings.vim_lite {
+                        self.vim_lite.reset();
+                    }
+                    self.editor_settings_error = None;
+                    ctx.global_style_mut(|style| {
+                        apply_cursor_style(style, &self.editor_settings);
+                    });
+                    self.editor_settings_editor.status = Some("saved editor settings".to_owned());
+                }
+                Err(error) => {
+                    self.editor_settings_error = Some(error.clone());
+                    self.editor_settings_editor.status =
+                        Some(format!("cannot save settings: {error}"));
+                }
+            }
+        }
+    }
+
+    fn show_perf_status(&self, ui: &mut egui::Ui) {
+        let insert = self.document.buffer.insert_timing();
+        let label = if insert.count() == 0 {
+            "perf ready".to_owned()
+        } else {
+            format!("perf edit {}", format_ns(insert.last_ns()))
+        };
+
+        let first_ui = self
+            .metrics
+            .first_ui
+            .map(|duration| format_ns(duration.as_nanos().min(u64::MAX as u128) as u64))
+            .unwrap_or_else(|| "pending".to_owned());
+
+        let expansion = self.document.buffer.expansion_lookup_timing();
+        let indexes = self.document.buffer.index_stats();
+        let total_indexes = indexes.ascii_fast.saturating_add(indexes.utf8_fallback);
+        let ascii_percent = if total_indexes == 0 {
+            0.0
+        } else {
+            indexes.ascii_fast as f64 * 100.0 / total_indexes as f64
+        };
+
+        let tooltip = format!(
+            "first UI: {first_ui}\n\
+             frame CPU last/avg/max: {}/{}/{}\n\
+             edit CPU last/avg/max: {}/{}/{}\n\
+             expansion lookup last/avg/max: {}/{}/{}\n\
+             index path: {:.1}% ASCII O(1) ({} fast / {} UTF-8 fallback)\n\
+             snapshot clone last/max: {}/{}\n\
+             background save last/max: {}/{}\n\
+             editor trace: {}\n\
+             document: {} bytes · buffer path: {}",
+            format_ns(self.metrics.frame_cpu.last_ns()),
+            format_ns(self.metrics.frame_cpu.average_ns()),
+            format_ns(self.metrics.frame_cpu.max_ns()),
+            format_ns(insert.last_ns()),
+            format_ns(insert.average_ns()),
+            format_ns(insert.max_ns()),
+            format_ns(expansion.last_ns()),
+            format_ns(expansion.average_ns()),
+            format_ns(expansion.max_ns()),
+            ascii_percent,
+            indexes.ascii_fast,
+            indexes.utf8_fallback,
+            format_ns(self.metrics.snapshot_clone.last_ns()),
+            format_ns(self.metrics.snapshot_clone.max_ns()),
+            format_ns(self.metrics.background_save.last_ns()),
+            format_ns(self.metrics.background_save.max_ns()),
+            self.jitter_recorder.path().display(),
+            self.document.buffer.text().len(),
+            if self.document.buffer.is_ascii_fast_path() {
+                "ASCII fast"
+            } else {
+                "UTF-8 fallback"
+            },
+        );
+
+        ui.weak(label).on_hover_text(tooltip);
+    }
+}
+
+impl eframe::App for LexwrightApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let frame_started = Instant::now();
+
+        if self.scratch_copy_quit_pending {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        self.sync_zoom_preference(ui.ctx());
+
+        if self.is_scratch()
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::J))
+        {
+            self.begin_scratch_copy_quit(ui.ctx());
+        }
+
+        // The status bar contains dynamic text. In egui, a widget wider than max_rect
+        // can expand the parent Ui's max_rect. Never derive editor width after rendering
+        // that bar or status-string changes will rewrap the entire document.
+        let editor_viewport_width = ui.available_width();
+
+        if self.metrics.first_ui.is_none() {
+            self.metrics.first_ui = Some(self.metrics.process_started.elapsed());
+        }
+
+        self.poll_save_events();
+        self.poll_analysis();
+        self.poll_harper();
+        self.maybe_queue_harper();
+        self.maybe_autosave();
+
+        if self.document.queued_revision > self.document.saved_revision
+            || self.document.analysis_pending_revision.is_some()
+            || self.document.harper_pending_revision.is_some()
+        {
+            ui.ctx().request_repaint_after(SAVE_STATUS_POLL);
+        }
+
+        if self.harper_enabled
+            && let Some(last_edit) = self.document.last_edit
+            && last_edit.elapsed() < HARPER_IDLE
+        {
+            ui.ctx()
+                .request_repaint_after(HARPER_IDLE.saturating_sub(last_edit.elapsed()));
+        }
+
+        ui.add_space(6.0);
+        let compact_top_bar = editor_viewport_width < 1180.0;
+        if compact_top_bar {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Lexwright");
+                ui.separator();
+                if self.is_scratch() {
+                    self.show_scratch_controls(ui);
+                } else {
+                    self.show_save_status(ui);
+                }
+                self.show_launch_error(ui);
+                ui.separator();
+                self.show_navigation_status(ui);
+                ui.separator();
+                self.show_expansion_status_compact(ui);
+                ui.separator();
+                self.show_cursor_status(ui);
+                ui.separator();
+                if ui.small_button("status").clicked() {
+                    self.status_window = true;
+                }
+                ui.weak("doc").on_hover_text(&self.document.path_label);
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.strong("Lexwright");
+                ui.separator();
+                if self.is_scratch() {
+                    self.show_scratch_controls(ui);
+                } else {
+                    self.show_save_status(ui);
+                }
+                self.show_launch_error(ui);
+                ui.separator();
+                self.show_expansion_status(ui);
+                ui.separator();
+                self.show_analysis_status(ui);
+                ui.separator();
+                self.show_structure_status(ui);
+                ui.separator();
+                self.show_morphology_status(ui);
+                ui.separator();
+                self.show_lexeme_status(ui);
+                ui.separator();
+                self.show_expansion_candidate_status(ui);
+                ui.separator();
+                self.show_harper_status(ui);
+                ui.separator();
+                self.show_perf_status(ui);
+                ui.separator();
+                self.show_cursor_status(ui);
+                ui.separator();
+                self.show_navigation_status(ui);
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak("document").on_hover_text(&self.document.path_label);
+                });
+            });
+        }
+        ui.separator();
+        if !self.is_scratch() {
+            self.show_document_tabs(ui);
+            ui.separator();
+        }
+
+        self.show_rule_editor(ui.ctx());
+        self.show_status_window(ui.ctx());
+        self.show_lexeme_window(ui.ctx());
+        self.show_expansion_candidate_window(ui.ctx());
+        self.show_harper_window(ui.ctx());
+        self.show_editor_settings_window(ui.ctx());
+
+        let editor_id =
+            egui::Id::new(("lexwright-ledger-editor", self.document.path_label.as_str()));
+        self.apply_pending_external_edit(ui.ctx(), editor_id);
+        let nav_command = self
+            .vim_lite
+            .capture(ui, editor_id, self.editor_settings.vim_lite);
+
+        let lexical_spans = if self.structure_overlay {
+            self.document
+                .analysis_latest
+                .as_ref()
+                .filter(|analysis| analysis.revision == self.document.revision)
+                .map(|analysis| Arc::clone(&analysis.lexical_spans))
+        } else {
+            None
+        };
+
+        let morph_spans = if self.morphology_overlay {
+            self.document
+                .analysis_latest
+                .as_ref()
+                .filter(|analysis| analysis.revision == self.document.revision)
+                .map(|analysis| Arc::clone(&analysis.morph_spans))
+        } else {
+            None
+        };
+
+        let editor_size = egui::vec2(editor_viewport_width, ui.available_height());
+
+        // Restore the exact geometry contract Lexwright used before the editor-jitter
+        // regressions: desired_width(INFINITY) inside the same centered-and-justified
+        // child UI used by Ui::add_sized(ui.available_size(), ...).
+        //
+        // We reproduce add_sized here only because Harper needs TextEditOutput.galley
+        // for post-paint underlines; the sizing semantics stay identical to add_sized.
+        let editor_layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
+        let language_overlay_active = self.structure_overlay || self.morphology_overlay;
+
+        let output = ui
+            .allocate_ui_with_layout(editor_size, editor_layout, |ui| {
+                if !language_overlay_active {
+                    egui::TextEdit::multiline(&mut self.document.buffer)
+                        .font(egui::FontId::monospace(self.editor_settings.font_size))
+                        .desired_width(ui.available_width())
+                        .lock_focus(true)
+                        .hint_text(
+                            egui::RichText::new("Write.")
+                                .font(egui::FontId::monospace(self.editor_settings.font_size)),
+                        )
+                        .id(editor_id)
+                        .show(ui)
+                } else {
+                    let mut layouter =
+                        |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+                            decorated_galley(
+                                ui,
+                                buffer.as_str(),
+                                wrap_width,
+                                lexical_spans.as_deref(),
+                                morph_spans.as_deref(),
+                                self.editor_settings.font_size,
+                            )
+                        };
+
+                    egui::TextEdit::multiline(&mut self.document.buffer)
+                        .font(egui::FontId::monospace(self.editor_settings.font_size))
+                        .desired_width(ui.available_width())
+                        .lock_focus(true)
+                        .hint_text(
+                            egui::RichText::new("Write.")
+                                .font(egui::FontId::monospace(self.editor_settings.font_size)),
+                        )
+                        .id(editor_id)
+                        .layouter(&mut layouter)
+                        .show(ui)
+                }
+            })
+            .inner;
+        let response = &output.response;
+
+        // TextEdit has already mutated EditorBuffer at this point. Consume those exact
+        // deltas before painting any analyzer decoration against the new text.
+        if response.changed() {
+            self.mark_edited(ui.ctx());
+        }
+
+        self.vim_lite.apply(
+            ui.ctx(),
+            editor_id,
+            &output.galley,
+            self.document.buffer.text(),
+            output.cursor_range,
+            nav_command,
+        );
+
+        let harper_diagnostics = if self.harper_enabled
+            && self.document.harper_display_revision == Some(self.document.revision)
+        {
+            Some(Arc::clone(&self.document.harper_display_diagnostics))
+        } else {
+            None
+        };
+
+        if let Some(diagnostics) = harper_diagnostics.as_deref() {
+            paint_harper_underlines(
+                ui,
+                &output.galley,
+                output.galley_pos,
+                output.text_clip_rect,
+                diagnostics,
+            );
+        }
+
+        if self.focus_editor {
+            response.request_focus();
+            self.focus_editor = false;
+        }
+
+        let should_trace = response.changed()
+            || self
+                .document
+                .last_edit
+                .is_some_and(|last_edit| last_edit.elapsed() <= Duration::from_millis(500));
+
+        if should_trace {
+            let (cursor_index, cursor_row, cursor_column) =
+                output
+                    .cursor_range
+                    .map_or((usize::MAX, usize::MAX, usize::MAX), |range| {
+                        let layout = output.galley.layout_from_cursor(range.primary);
+                        (range.primary.index.0, layout.row, layout.column.0)
+                    });
+
+            self.jitter_recorder.record(JitterFrame {
+                elapsed_us: self.metrics.process_started.elapsed().as_micros(),
+                revision: self.document.revision,
+                changed: response.changed(),
+                editor_x: response.rect.min.x,
+                editor_y: response.rect.min.y,
+                editor_w: response.rect.width(),
+                editor_h: response.rect.height(),
+                galley_x: output.galley_pos.x,
+                galley_y: output.galley_pos.y,
+                galley_w: output.galley.size().x,
+                galley_h: output.galley.size().y,
+                wrap_w: output.galley.job.wrap.max_width,
+                rows: output.galley.rows.len(),
+                cursor_index,
+                cursor_row,
+                cursor_column,
+                queued_revision: self.document.queued_revision,
+                saved_revision: self.document.saved_revision,
+                analysis_revision: self
+                    .document
+                    .analysis_latest
+                    .as_ref()
+                    .map(|analysis| analysis.revision),
+                harper_revision: self
+                    .document
+                    .harper_latest
+                    .as_ref()
+                    .map(|result| result.revision),
+                expansion_hits: self.document.buffer.expansion_hits(),
+            });
+        }
+
+        self.metrics.frame_cpu.observe(frame_started.elapsed());
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.flush_zoom_preference();
+
+        if self.is_scratch() {
+            return;
+        }
+
+        self.queue_current_revision();
+        let _ = self.document.store.flush();
+        if let Some(workspace) = &self.workspace {
+            let _ = workspace.flush_inactive();
+        }
+    }
+}
+
+fn apply_cursor_visuals(visuals: &mut egui::Visuals, settings: &EditorSettings) {
+    visuals.text_cursor.stroke.width = settings.cursor_width;
+    visuals.text_cursor.blink = settings.cursor_blink;
+    visuals.text_cursor.on_duration = settings.cursor_on_seconds;
+    visuals.text_cursor.off_duration = settings.cursor_off_seconds;
+}
+
+fn apply_cursor_style(style: &mut egui::Style, settings: &EditorSettings) {
+    apply_cursor_visuals(&mut style.visuals, settings);
+}
+
+fn decorated_galley(
+    ui: &egui::Ui,
+    text: &str,
+    wrap_width: f32,
+    lexical_spans: Option<&[LexicalSpan]>,
+    morph_spans: Option<&[MorphSpan]>,
+    font_size: f32,
+) -> Arc<egui::Galley> {
+    let font_id = egui::FontId::monospace(font_size);
+    let text_color = ui
+        .visuals()
+        .override_text_color
+        .unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
+    let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
+    let line_height = row_height + ui.spacing().extra_text_line_spacing;
+
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+    job.keep_trailing_whitespace = true;
+
+    if text.is_empty() {
+        job.append(
+            "",
+            0.0,
+            egui::TextFormat {
+                font_id,
+                color: text_color,
+                line_height: Some(line_height),
+                ..Default::default()
+            },
+        );
+        return ui.fonts_mut(|fonts| fonts.layout_job(job));
+    }
+
+    let mut boundaries = Vec::with_capacity(
+        2 + lexical_spans.map_or(0, |spans| spans.len() * 2)
+            + morph_spans.map_or(0, |spans| spans.len() * 2),
+    );
+    boundaries.push(0);
+    boundaries.push(text.len());
+
+    if let Some(spans) = lexical_spans {
+        for span in spans {
+            push_valid_boundaries(text, &mut boundaries, span.start, span.end);
+        }
+    }
+
+    if let Some(spans) = morph_spans {
+        for span in spans {
+            push_valid_boundaries(text, &mut boundaries, span.start, span.end);
+        }
+    }
+
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    for pair in boundaries.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+
+        if start >= end {
+            continue;
+        }
+
+        let color = morph_spans
+            .and_then(|spans| {
+                spans
+                    .iter()
+                    .find(|span| span.start <= start && end <= span.end)
+                    .map(|span| morphology_color(span.class))
+            })
+            .or_else(|| {
+                lexical_spans.and_then(|spans| {
+                    spans
+                        .iter()
+                        .find(|span| span.start <= start && end <= span.end)
+                        .map(|span| lexical_color(span.class))
+                })
+            })
+            .unwrap_or(text_color);
+
+        job.append(
+            &text[start..end],
+            0.0,
+            egui::TextFormat {
+                font_id: font_id.clone(),
+                color,
+                line_height: Some(line_height),
+                ..Default::default()
+            },
+        );
+    }
+
+    ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
+fn paint_harper_underlines(
+    ui: &egui::Ui,
+    galley: &egui::Galley,
+    galley_pos: egui::Pos2,
+    clip_rect: egui::Rect,
+    diagnostics: &[HarperDiagnostic],
+) {
+    let painter = ui.painter_at(clip_rect);
+
+    for diagnostic in diagnostics {
+        if diagnostic.start_char >= diagnostic.end_char {
+            continue;
+        }
+
+        let start_cursor = egui::text::CCursor::new(diagnostic.start_char);
+        let mut end_cursor = egui::text::CCursor::new(diagnostic.end_char);
+        end_cursor.prefer_next_row = false;
+
+        let start = galley.layout_from_cursor(start_cursor);
+        let end = galley.layout_from_cursor(end_cursor);
+
+        if start.row >= galley.rows.len() || end.row >= galley.rows.len() || start.row > end.row {
+            continue;
+        }
+
+        let stroke = egui::Stroke::new(1.0, harper_underline_color(diagnostic.kind.as_ref()));
+
+        for row_index in start.row..=end.row {
+            let row = &galley.rows[row_index];
+            let left = if row_index == start.row {
+                row.x_offset(start.column)
+            } else {
+                0.0
+            };
+            let right = if row_index == end.row {
+                row.x_offset(end.column)
+            } else {
+                row.size.x
+            };
+
+            if right <= left {
+                continue;
+            }
+
+            let x1 = galley_pos.x + row.pos.x + left;
+            let x2 = galley_pos.x + row.pos.x + right;
+            let y = galley_pos.y + row.pos.y + row.max_y() - 1.0;
+
+            painter.line_segment([egui::pos2(x1, y), egui::pos2(x2, y)], stroke);
+        }
+    }
+}
+
+fn shift_index(index: usize, delta: isize) -> Option<usize> {
+    if delta >= 0 {
+        index.checked_add(delta as usize)
+    } else {
+        index.checked_sub(delta.unsigned_abs())
+    }
+}
+
+fn push_valid_boundaries(text: &str, boundaries: &mut Vec<usize>, start: usize, end: usize) {
+    if start > end
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return;
+    }
+
+    boundaries.push(start);
+    boundaries.push(end);
+}
+
+fn harper_underline_color(kind: &str) -> egui::Color32 {
+    let kind = kind.to_ascii_lowercase();
+
+    if kind.contains("spelling") {
+        egui::Color32::from_rgb(255, 92, 92)
+    } else if kind.contains("capital") {
+        egui::Color32::from_rgb(255, 190, 92)
+    } else {
+        egui::Color32::from_rgb(255, 138, 92)
+    }
+}
+
+fn morphology_color(class: MorphClass) -> egui::Color32 {
+    match class {
+        MorphClass::Prefix => egui::Color32::from_rgb(222, 151, 255),
+        MorphClass::Stem => egui::Color32::from_rgb(255, 218, 120),
+        MorphClass::Suffix => egui::Color32::from_rgb(105, 210, 180),
+    }
+}
+
+fn lexical_color(class: LexicalClass) -> egui::Color32 {
+    match class {
+        LexicalClass::Pronoun => egui::Color32::from_rgb(222, 151, 255),
+        LexicalClass::Determiner => egui::Color32::from_rgb(145, 190, 255),
+        LexicalClass::Preposition => egui::Color32::from_rgb(105, 210, 220),
+        LexicalClass::Conjunction => egui::Color32::from_rgb(255, 181, 103),
+        LexicalClass::Auxiliary => egui::Color32::from_rgb(255, 129, 162),
+        LexicalClass::VerbLike => egui::Color32::from_rgb(255, 112, 112),
+        LexicalClass::AdjectiveLike => egui::Color32::from_rgb(248, 211, 106),
+        LexicalClass::AdverbLike => egui::Color32::from_rgb(137, 222, 138),
+        LexicalClass::NounLike => egui::Color32::from_rgb(120, 181, 255),
+    }
+}
+
+fn expansion_report_path() -> PathBuf {
+    if let Some(state_home) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(state_home).join("lexwright/expansion-session.md");
+    }
+
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(home).join(".local/state/lexwright/expansion-session.md");
+    }
+
+    PathBuf::from("lexwright-expansion-session.md")
+}
+
+fn export_expansion_report(buffer: &EditorBuffer) -> Result<PathBuf, String> {
+    let path = expansion_report_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+
+    fs::write(&path, buffer.expansion_session_report())
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+
+    Ok(path)
+}
+
+fn format_ns(nanos: u64) -> String {
+    if nanos == 0 {
+        return "—".to_owned();
+    }
+
+    if nanos < 1_000 {
+        format!("{nanos} ns")
+    } else if nanos < 1_000_000 {
+        format!("{:.1} µs", nanos as f64 / 1_000.0)
+    } else {
+        format!("{:.2} ms", nanos as f64 / 1_000_000.0)
+    }
+}
