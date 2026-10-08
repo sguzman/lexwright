@@ -825,8 +825,9 @@ impl LexwrightApp {
         ));
 
         if self.scratch_overlay {
-            ui.weak("FLOATING")
-                .on_hover_text("Scratch overlay: floats above tiled windows without resizing their layout.");
+            ui.weak("FLOATING").on_hover_text(
+                "Scratch overlay: floats above tiled windows without resizing their layout.",
+            );
         }
 
         if let Some(error) = &self.scratch_copy_error {
